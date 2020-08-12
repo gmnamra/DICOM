@@ -1,143 +1,281 @@
+#!/usr/bin/env python
+
+# import libraries
 import pydicom
-import cv2 as cv
-import PIL
-import matplotlib.pyplot as plt
-import numpy as np
-from numpy import matrix
-from numpy import linalg
 import os
-import sys
-import math
-import struct
-
-
-
-# common packages
-import numpy as np
-import os
-import copy
-from math import *
-import matplotlib.pyplot as plt
-from functools import reduce
-# reading in dicom files
-import pydicom as dicom
-from pydicom.datadict import tag_for_keyword, keyword_for_tag, repeater_has_keyword
-
-# skimage image processing packages
-from skimage import measure, morphology
-from skimage.morphology import ball, binary_closing
-from skimage.measure import label, regionprops
-# scipy linear algebra functions
-from scipy.linalg import norm
-import scipy.ndimage
-# ipywidgets for some interactive plots
-from ipywidgets.widgets import *
-import ipywidgets as widgets
-# plotly 3D interactive graphs
-import plotly
-from plotly.graph_objs import *
-import chart_studio.plotly as py
+import re
+import argparse
+import glob
 from pathlib import Path
-# set plotly credentials here
-# this allows you to send results to your account plotly.tools.set_credentials_file(username=your_username, api_key=your_key)
+import numpy as np
 
 
-# These are DICOM standard tags
-TAG_SOP_CLASS_UID = (0x0008, 0x0016)
 
-# These are some Siemens-specific tags
-TAG_CONTENT_TYPE                          = (0x0029, 0x1008)
-TAG_SPECTROSCOPY_DATA_DICOM_SOP           = (0x5600, 0x0020)
-TAG_SPECTROSCOPY_DATA_SIEMENS_PROPRIETARY = (0x7fe1, 0x1010)
+from interpolation import linear_interpolate
+from operator import attrgetter
 
 
-firstFile = r'/Volumes/t5backup/MRIp4/mri_images/shmolli_images/1SHMOLLI_20204/1.3.12.2.1107.5.2.18.41754.201609121313103844008230.dcm'
-secondFile = r'/Volumes/t5backup/MRIp4/mri_images/ideal_images/1_IDEAL_20254/1.3.12.2.1107.5.2.18.41754.2016091213121636910507776.dcm'
+def getPixelDataFromDataset(ds):
+    """  return the pixel data from the given dataset. If the data
+    was deferred, make it deferred again, so that memory is
+    preserved. Also applies RescaleSlope and RescaleIntercept
+    if available. """
+
+    # Get data
+    data = np.array(ds.pixel_array).copy()
+
+    # Obtain slope and offset
+    slope = 1
+    offset = 0
+    needFloats = False
+    needApplySlopeOffset = False
+    if 'RescaleSlope' in ds:
+        needApplySlopeOffset = True
+        slope = ds.RescaleSlope
+    if 'RescaleIntercept' in ds:
+        needApplySlopeOffset = True
+        offset = ds.RescaleIntercept
+    if int(slope) != slope or int(offset) != offset:
+        needFloats = True
+    if not needFloats:
+        slope, offset = int(slope), int(offset)
+
+    # Apply slope and offset
+    if needApplySlopeOffset:
+
+        # Maybe we need to change the datatype?
+        if data.dtype in [np.float32, np.float64]:
+            pass
+        elif needFloats:
+            data = data.astype(np.float32)
+        else:
+            # Determine required range
+            minReq, maxReq = data.min(), data.max()
+            minReq = min(
+                    [minReq, minReq * slope + offset, maxReq * slope + offset])
+            maxReq = max(
+                    [maxReq, minReq * slope + offset, maxReq * slope + offset])
+
+            # Determine required datatype from that
+            dtype = None
+            if minReq < 0:
+                # Signed integer type
+                maxReq = max([-minReq, maxReq])
+                if maxReq < 2**7:
+                    dtype = np.int8
+                elif maxReq < 2**15:
+                    dtype = np.int16
+                elif maxReq < 2**31:
+                    dtype = np.int32
+                else:
+                    dtype = np.float32
+            else:
+                # Unsigned integer type
+                if maxReq < 2**8:
+                    dtype = np.uint8
+                elif maxReq < 2**16:
+                    dtype = np.uint16
+                elif maxReq < 2**32:
+                    dtype = np.uint32
+                else:
+                    dtype = np.float32
+
+            # Change datatype
+            if dtype != data.dtype:
+                data = data.astype(dtype)
+
+        # Apply slope and offset
+        data *= slope
+        data += offset
+
+    # Done
+    return data
+
+# %%
+def normalize_image (img):
+    """ Normalize image values to [0,1] """
+    min_, max_ = float (np.min (img)), float (np.max (img))
+    return (img - min_) / (max_ - min_)
 
 
-def _empty_string(value, default):
-    if value == '':
-        return default
-    else:
-        return value
+def read_dicom (path):
+    """
+    INPUTS:
+        path:
+            a string denoting the path
+    OUTPUT:
+        list object of dicom files
+    """
+    # regular expression search for .dcm file
+    if re.search (".dcm$", path) is not None:
+        return pydicom.dcmread (path, force=True)
+
+def sort_dicom_list (dicom_list):
+    """
+    INPUTS:
+        dicom_list:
+            an unsorted list of dicom objects
+    OUTPUT:
+        sorted list of dicom objects based off of dicom InstanceNumber
+    """
+
+    # sort according slice position so we are ALWAYS going from superior -> inferior
+    s_dicom_lst = sorted (dicom_list, key=attrgetter ('SliceLocation'), reverse=True)
+
+    return s_dicom_lst
 
 
-def _get (dataset, tag, default=None):
-    """Returns the value of a dataset tag, or the default if the tag isn't
-    in the dataset.
-    PyDicom datasets already have a .get() method, but it returns a
-    dicom.DataElement object. In practice it's awkward to call dataset.get()
-    and then figure out if the result is the default or a DataElement,
-    and if it is the latter _get the .value attribute. This function allows
-    me to avoid all that mess.
-    It is also a workaround for this bug (which I submitted) which should be
-    fixed in PyDicom > 0.9.3:
-    http://code.google.com/p/pydicom/issues/detail?id=72
-    Also for this bug (which I submitted) which should be
-    fixed in PyDicom > 0.9.4-1:
-    http://code.google.com/p/pydicom/issues/detail?id=88
+def process_dicom (path, target_x_size=0, target_y_size=0, target_z_size=0):
+    """
+    At some point we may want to decimate these.
+    """
+    # initialize rslt_dict
+    result_dict = {}
 
-    bjs - added the option that the tag may exist, but be blank. In this case
-          we will return the default value. This is especially important if
-          the data has been run through an anonymizer as many of these leave
-          the tag but set it to a blank string.
+    # read dicom files
+    dicom_files = Path (path).glob ('*.dcm')
+    files = [x for x in p if x.is_file ()]
+    dicom_lst = [read_dicom (x) for x in dicom_files]
+    dicom_lst = [x for x in dicom_lst if x is not None]
+    # sort list
+    dicom_lst = sort_dicom_list (dicom_lst)
+
+    # return image sizes to result dict
+    Nx = dicom_lst [0].Rows
+    Ny = dicom_lst [0].Columns
+
+    # @todo: decimate using interpolate when we know more
+    # perhaps downsample
+    # Nz = np.int( dicom_lst[-1].InstanceNumber - dicom_lst[0].InstanceNumber+1)
+    Nz = len (dicom_lst)
+    target_z_size = Nz
+    # also give the option using original image matrix
+    target_x_size = Nx
+    target_y_size = Ny
+
+    # the following data might not be available due to anonymization
+    try:
+        result_dict ['patientID'] = dicom_lst [0].PatientID
+        result_dict ['AcquisitionDate'] = dicom_lst [0].AcquisitionDate
+    except:
+        pass
+
+        # get the resolution of the matrix
+    scale_x = target_x_size / Nx
+    scale_y = target_y_size / Ny
+    scale_z = target_z_size / Nz
+    result_dict ['image_scale'] = (scale_x, scale_y, scale_z)
+    x_sampling = np.float (dicom_lst [0].PixelSpacing [0])
+    y_sampling = np.float (dicom_lst [0].PixelSpacing [1])
+    z_sampling = np.float (dicom_lst [0].SliceThickness)
+    result_dict ['image_resolution'] = (x_sampling * scale_x, y_sampling * scale_y, z_sampling * scale_z)
+
+    # make a list and cast as 3D matrix
+    pxl_lst = [x.astype('float32').pixel_array for x in dicom_lst]
+
+    pxl_mtx = pxl_lst
+    #pxl_mtx = linear_interpolate (pxl_lst, target_z_size)
+    result_dict ['image_data'] = pxl_lst
+    return result_dict
+
+
+# %% the following are modified routines to handle multi-echoes MRI series that
+def sort_dicom_list_multiEchoes (dicom_list):
+    """
+    This function sorts 1st by instance number and then by echo number
+    note that echo numbers and echo time correspond
+    returns a 2-dimensional list of images with same echoes into one list
 
     """
-    if tag not in dataset:
-        return default
 
-    if dataset [tag].value == '':
-        return default
+    s_dicom_lst = sorted (dicom_list, key=attrgetter ('InstanceNumber'))
+    ss_dicom_lst = sorted (s_dicom_lst, key=attrgetter ('EchoNumbers'))
+    num_echoes = ss_dicom_lst [-1].EchoNumbers
+    dicom_list_groupedby_echoNumber = [None] * num_echoes
+    for ii in range (num_echoes):
+        tmp_list = []
+        for dicomObj in ss_dicom_lst:
+            if dicomObj.EchoNumbers == ii + 1:
+                tmp_list.append (dicomObj)
+        dicom_list_groupedby_echoNumber [ii] = tmp_list
 
-    return dataset [tag].value
+    return dicom_list_groupedby_echoNumber
 
 
+# %%
+def process_dicom_multi_echo (path, target_x_size=0, target_y_size=0, target_z_size=0):
+    result_dict = {}
+    # store files and append path
+    dicom_files = glob.glob (os.path.join (path, "*.dcm"))
+    # dicom_files = [path + "/" + x for x in dicom_files]
+
+    # read dicom files
+    dicom_lst = [read_dicom (x) for x in dicom_files]
+    dicom_lst = [x for x in dicom_lst if x is not None]
+    # sort list
+    # this return a 2-dimension list with all dicom image objects within the same
+    # echo number store in the same list
+    dicom_lst = sort_dicom_list_multiEchoes (dicom_lst)
+    num_echoes = len (dicom_lst)
+    print ("num of series: " + str (len (dicom_lst [1])))
+
+    # reports back the first and last instance number of the image sequence
+    result_dict ['first_instance_number'] = dicom_lst [0] [0].InstanceNumber
+    result_dict ['last_instance_number'] = dicom_lst [-1] [-1].InstanceNumber
+    Nimg = np.abs ((result_dict ['last_instance_number'] - result_dict ['first_instance_number']) + 1)
+    # return image sizes to result dict
+    Nz = np.int (Nimg / num_echoes)
+    Ny = np.int (dicom_lst [0] [0].Rows)
+    Nx = np.int (dicom_lst [0] [0].Columns)
+    # the following data might not be available due to anonymization
+    try:
+        result_dict ['patientID'] = dicom_lst [0] [0].PatientID
+        result_dict ['AcquisitionDate'] = dicom_lst [0] [0].AcquisitionDate
+    except:
+        pass
+    # make a list and cast as 3D matrix for each echo
+    # give the option that don't interpolate along the z-axis if 2-D processing
+    if target_z_size == 0:
+        target_z_size = Nz
+    # also give the option using original image matrix
+    if target_x_size == 0:
+        target_x_size = Nx
+
+    if target_y_size == 0:
+        target_y_size = Ny
+
+    scale_x = target_x_size / Nx
+    scale_y = target_y_size / Ny
+    scale_z = target_z_size / Nz
+    result_dict ['image_scale'] = (scale_x, scale_y, scale_z)
+    result_dict ['num_echoes'] = num_echoes
+    x_sampling = np.float (dicom_lst [0] [0].PixelSpacing [0])
+    y_sampling = np.float (dicom_lst [0] [0].PixelSpacing [1])
+    z_sampling = np.float (dicom_lst [0] [0].SliceThickness)
+    result_dict ['image_resolution'] = (x_sampling * scale_x, y_sampling * scale_y, z_sampling * scale_z)
+    pxl_mtx = np.zeros ((target_y_size, target_x_size, target_z_size, num_echoes))
+
+    for ii in range (num_echoes):
+        ## interleaved phase and in place
+        phase_list = []
+        inplace_list = []
+        pxl_lst = [getPixelDataFromDataset(ds) for ds in dicom_lst[ii]]
+        even = range(0, len(dicom_lst[ii]), 2)
+        odd = range(1,len(dicom_lst[ii]), 2)
+        phase_stack = np.stack ([pxl_lst [e] for e in even])
+        inplace_stack = np.stack ([pxl_lst [o] for o in odd])
 
 
-def load_scan(folder):
-    assert(os.path.isdir(folder))
-    p = Path (folder).glob ('*.dcm')
-    files = [x for x in p if x.is_file ()]
-    files.sort(key=lambda f: int(str(f.name).split('.')[9]))
-    slices = [pydicom.dcmread (str(file)) for file in files]
-    image = np.stack ([s.pixel_array for s in slices])
-    image = np.array (image, dtype=np.int16)
-    foo = np.histogram(image, bins=256)
-    params = []
-    pparams = []
-    def print_get(data,  stringKey):
-        val = _get(data, stringKey)
-        if not ( val is None):
-            print(('[%s] = %f') % (stringKey, val))
-        return val
+        result_dict ['image_data'] = pxl_mtx
 
-    series = {}
-    for idx, slice in enumerate(slices):
-        print('---%d----' % (idx))
-        print_get(slice,'EchoTime')
-        sn = (int)(print_get(slice,'SeriesNumber'))
-        if not ( sn in series):
-            series[sn] = []
-        series[sn].append(idx)
-        print('---%d----' % (idx))
+    return result_dict
 
-    stacks = {}
-    for key,value in series.items():
-         print(len(value))
-         stacks[key] = np.stack ([slices[s].pixel_array for s in value])
-
-    avg_41 = stacks[41].mean(axis=0)
-    plt.imshow(avg_41)
-    plt.show()
-
-    return slices
 
 
 def main():
-#    slices = load_scan ('/Volumes/t5backup/MRIp4/mri_images/ideal_images/1_IDEAL_20254/')
-    slices = load_scan ('/Volumes/t5backup 1/MRIp4/mri_images/shmolli_images/1SHMOLLI_20204')
-
-    # slice = pydicom.dcmread(firstFile)
+    path = '/Volumes/t5backup/MRIp4/mri_images/ideal_images/1_IDEAL_20254/'
+   # path = '/Volumes/t5backup 1/MRIp4/mri_images/shmolli_images/1SHMOLLI_20204'
+    volume = process_dicom_multi_echo(path)
     print ('done')
 
 

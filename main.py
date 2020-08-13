@@ -3,6 +3,7 @@
 # import libraries
 import pydicom
 import os
+import sys
 import re
 import argparse
 import glob
@@ -224,7 +225,7 @@ def process_dicom_multi_echo (path, target_x_size=0, target_y_size=0, target_z_s
     result_dict ['last_instance_number'] = dicom_lst [-1] [-1].InstanceNumber
     Nimg = np.abs ((result_dict ['last_instance_number'] - result_dict ['first_instance_number']) + 1)
     # return image sizes to result dict
-    Nz = np.int (Nimg / num_echoes)
+    Nz = 6 #np.int (Nimg / num_echoes)
     Ny = np.int (dicom_lst [0] [0].Rows)
     Nx = np.int (dicom_lst [0] [0].Columns)
     # the following data might not be available due to anonymization
@@ -253,28 +254,33 @@ def process_dicom_multi_echo (path, target_x_size=0, target_y_size=0, target_z_s
     y_sampling = np.float (dicom_lst [0] [0].PixelSpacing [1])
     z_sampling = np.float (dicom_lst [0] [0].SliceThickness)
     result_dict ['image_resolution'] = (x_sampling * scale_x, y_sampling * scale_y, z_sampling * scale_z)
-    pxl_mtx = np.zeros ((target_y_size, target_x_size, target_z_size, num_echoes))
-
+    result_dict['Phase'] = {}
+    result_dict['Magnitude'] = {}
+    result_dict ['PhaseVoxels'] = {}
+    result_dict ['MagnitudeVoxels'] = {}
     for ii in range (num_echoes):
         ## interleaved phase and in place
         phase_list = []
         inplace_list = []
+        #@todo use ['ImageType'][2] instaead for hardwiring it.
         pxl_lst = [getPixelDataFromDataset(ds) for ds in dicom_lst[ii]]
         even = range(0, len(dicom_lst[ii]), 2)
         odd = range(1,len(dicom_lst[ii]), 2)
-        phase_stack = np.stack ([pxl_lst [e] for e in even])
-        inplace_stack = np.stack ([pxl_lst [o] for o in odd])
-
-
-        result_dict ['image_data'] = pxl_mtx
+        phases = np.array ([pxl_lst [e] for e in even])
+        mags = np.array ([pxl_lst [o] for o in odd])
+        result_dict ['Phase'] [ii] = phases
+        result_dict ['Magnitude'] [ii] = mags
+        result_dict['PhaseVoxels'][ii] = np.sum(phases, axis=0)
+        result_dict['MagnitudeVoxels'][ii]= np.sum(mags, axis=0)
 
     return result_dict
 
 
 
 def main():
-    path = '/Volumes/t5backup/MRIp4/mri_images/ideal_images/1_IDEAL_20254/'
-   # path = '/Volumes/t5backup 1/MRIp4/mri_images/shmolli_images/1SHMOLLI_20204'
+    if len(sys.argv) < 2: return
+    path = sys.argv[1]
+    if not os.path.isdir(path): return
     volume = process_dicom_multi_echo(path)
     print ('done')
 

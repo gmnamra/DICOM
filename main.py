@@ -9,12 +9,12 @@ import argparse
 import glob
 from pathlib import Path
 import numpy as np
+import itertools
+import matplotlib.gridspec as gridspec
+import matplotlib.pyplot as plt
 
-
-
-from interpolation import linear_interpolate
 from operator import attrgetter
-
+from sklearn import preprocessing
 
 def getPixelDataFromDataset(ds):
     """  return the pixel data from the given dataset. If the data
@@ -94,9 +94,12 @@ def getPixelDataFromDataset(ds):
 
 # %%
 def normalize_image (img):
-    """ Normalize image values to [0,1] """
-    min_, max_ = float (np.min (img)), float (np.max (img))
-    return (img - min_) / (max_ - min_)
+
+    # l2-normalize the samples (rows).
+    return preprocessing.normalize (img, norm='l2')
+    # """ Normalize image values to [0,1] """
+    # min_, max_ = float (np.min (img)), float (np.max (img))
+    # return (img - min_) / (max_ - min_)
 
 
 def read_dicom (path):
@@ -217,8 +220,15 @@ def process_dicom_multi_echo (path, target_x_size=0, target_y_size=0, target_z_s
     # this return a 2-dimension list with all dicom image objects within the same
     # echo number store in the same list
     dicom_lst = sort_dicom_list_multiEchoes (dicom_lst)
-    num_echoes = len (dicom_lst)
-    print ("num of series: " + str (len (dicom_lst [1])))
+    result_dict['num_echos'] = len (dicom_lst)
+    result_dict['num_series'] = len (dicom_lst [1])
+    result_dict ['scanning_sequence'] = dicom_lst [0] [0].ScanningSequence
+    result_dict ['sequence_variant'] = dicom_lst [0] [0].SequenceVariant
+    result_dict ['magnetic_field_strength'] = dicom_lst[0] [0].MagneticFieldStrength
+    result_dict ['flip_angle'] = dicom_lst[0] [0].FlipAngle
+    result_dict ['TR'] = dicom_lst[0][0].RepetitionTime
+
+
 
     # reports back the first and last instance number of the image sequence
     result_dict ['first_instance_number'] = dicom_lst [0] [0].InstanceNumber
@@ -232,6 +242,7 @@ def process_dicom_multi_echo (path, target_x_size=0, target_y_size=0, target_z_s
     try:
         result_dict ['patientID'] = dicom_lst [0] [0].PatientID
         result_dict ['AcquisitionDate'] = dicom_lst [0] [0].AcquisitionDate
+        result_dict ['ScanningSequence'] = dicom_lst [0][0].ScanningSequence
     except:
         pass
     # make a list and cast as 3D matrix for each echo
@@ -249,40 +260,99 @@ def process_dicom_multi_echo (path, target_x_size=0, target_y_size=0, target_z_s
     scale_y = target_y_size / Ny
     scale_z = target_z_size / Nz
     result_dict ['image_scale'] = (scale_x, scale_y, scale_z)
-    result_dict ['num_echoes'] = num_echoes
     x_sampling = np.float (dicom_lst [0] [0].PixelSpacing [0])
     y_sampling = np.float (dicom_lst [0] [0].PixelSpacing [1])
     z_sampling = np.float (dicom_lst [0] [0].SliceThickness)
     result_dict ['image_resolution'] = (x_sampling * scale_x, y_sampling * scale_y, z_sampling * scale_z)
-    result_dict['Phase'] = {}
-    result_dict['Magnitude'] = {}
-    result_dict ['PhaseVoxels'] = {}
-    result_dict ['MagnitudeVoxels'] = {}
-    for ii in range (num_echoes):
-        ## interleaved phase and in place
-        phase_list = []
-        inplace_list = []
-        #@todo use ['ImageType'][2] instaead for hardwiring it.
-        pxl_lst = [getPixelDataFromDataset(ds) for ds in dicom_lst[ii]]
+    result_dict['Phase'] = []
+    result_dict['Magnitude'] = []
+    result_dict ['PhaseVoxels'] = []
+    result_dict ['MagnitudeVoxels'] = []
+    for ii in range (result_dict['num_echos']):
+        #@todo use ['ImageType'][2] instaead of hardwiring it.
+        pxl_lst = [normalize_image(getPixelDataFromDataset(ds)) for ds in dicom_lst[ii]]
+        image_types = [ds['ImageType'][2] for ds in dicom_lst[ii]]
+        mtype = [tt == 'M' for tt in image_types]
+        ptypes = [tt == 'P' for tt in image_types]
         even = range(0, len(dicom_lst[ii]), 2)
         odd = range(1,len(dicom_lst[ii]), 2)
         phases = np.array ([pxl_lst [e] for e in even])
         mags = np.array ([pxl_lst [o] for o in odd])
-        result_dict ['Phase'] [ii] = phases
-        result_dict ['Magnitude'] [ii] = mags
-        result_dict['PhaseVoxels'][ii] = np.sum(phases, axis=0)
-        result_dict['MagnitudeVoxels'][ii]= np.sum(mags, axis=0)
+        result_dict ['Phase'].append(phases)
+        result_dict ['Magnitude'].append (mags)
+        result_dict['PhaseVoxels'].append (np.sum(phases, axis=0))
+        result_dict['MagnitudeVoxels'].append(np.sum(mags, axis=0))
 
+    ## Collect magnitude In / Out phase sets. i.e. accross TEs
+    result_dict ['IPOP_mag'] = []
+    for s in range (result_dict['num_series']):
+        selecs = []
+        for e in range(result_dict['num_echos']):
+            selecs.append (result_dict['Magnitude'] [e] [s//2])
+        result_dict ['IPOP_mag'].append(selecs)
+
+    odd = range (1, len (result_dict['num_echos']), 2)
+
+    # Produce Coarse PDFFs using (IP - OP)/ (IP + IP)
     return result_dict
 
+
+def show_images (images, cols=1, titles=None):
+    """Display a list of images in a single figure with matplotlib.
+
+    Parameters
+    ---------
+    images: List of np.arrays compatible with plt.imshow.
+
+    cols (Default = 1): Number of columns in figure (number of rows is
+                        set to np.ceil(n_images/float(cols))).
+
+    titles: List of titles corresponding to each image. Must have
+            the same length as titles.
+    """
+    assert ((titles is None) or (len (images) == len (titles)))
+    n_images = len (images)
+    if titles is None: titles = ['Image (%d)' % i for i in range (1, n_images + 1)]
+    fig = plt.figure ()
+    for n, (image, title) in enumerate (zip (images, titles)):
+        a = fig.add_subplot (cols, np.ceil (n_images / float (cols)), n + 1)
+        if image.ndim == 2:
+            plt.gray ()
+        plt.imshow (image)
+        a.set_title (title)
+    fig.set_size_inches (np.array (fig.get_size_inches ()) * n_images)
+    plt.show ()
+
+# function to display images
+def display(images):
+    selecs = []
+    for col in range(6):
+        selecs.append(images[col][5])
+
+    show_images(selecs)
+
+def get_roi_signal(images, roi): # roi is x, y, width, height
+    signal = []
+    for idx in range(len(images)):
+        area = images[idx][roi[1]:roi[1]+roi[3],roi[0]:roi[0]+roi[2]]
+        signal.append(np.mean(area))
+
+    return signal
 
 
 def main():
     if len(sys.argv) < 2: return
     path = sys.argv[1]
     if not os.path.isdir(path): return
-    volume = process_dicom_multi_echo(path)
+    results = process_dicom_multi_echo(path)
     print ('done')
+    titles = [str(i) for i in range(6)]
+  #  for s in range(results['num_series']):
+   #     show_images(results['IPOP_mag'][s//2])
+
+    signal = get_roi_signal(results['IPOP_mag'][0], [50,100,25,25])
+    plt.plot(signal)
+    plt.show()
 
 
 if __name__ == '__main__':

@@ -269,8 +269,8 @@ def process_dicom_multi_echo (path, target_x_size=0, target_y_size=0, target_z_s
     result_dict ['PhaseVoxels'] = []
     result_dict ['MagnitudeVoxels'] = []
     for ii in range (result_dict['num_echos']):
-        #@todo use ['ImageType'][2] instaead of hardwiring it.
-        pxl_lst = [normalize_image(getPixelDataFromDataset(ds)) for ds in dicom_lst[ii]]
+        #@todo use ['ImageType'][2] instead of hardwiring it.
+        pxl_lst = [getPixelDataFromDataset(ds) for ds in dicom_lst[ii]]
         image_types = [ds['ImageType'][2] for ds in dicom_lst[ii]]
         mtype = [tt == 'M' for tt in image_types]
         ptypes = [tt == 'P' for tt in image_types]
@@ -283,15 +283,13 @@ def process_dicom_multi_echo (path, target_x_size=0, target_y_size=0, target_z_s
         result_dict['PhaseVoxels'].append (np.sum(phases, axis=0))
         result_dict['MagnitudeVoxels'].append(np.sum(mags, axis=0))
 
-    ## Collect magnitude In / Out phase sets. i.e. accross TEs
+    ## Collect magnitude In / Out phase sets. i.e. accross TEs for each series
     result_dict ['IPOP_mag'] = []
     for s in range (result_dict['num_series']):
         selecs = []
         for e in range(result_dict['num_echos']):
             selecs.append (result_dict['Magnitude'] [e] [s//2])
         result_dict ['IPOP_mag'].append(selecs)
-
-    odd = range (1, len (result_dict['num_echos']), 2)
 
     # Produce Coarse PDFFs using (IP - OP)/ (IP + IP)
     return result_dict
@@ -347,12 +345,31 @@ def main():
     results = process_dicom_multi_echo(path)
     print ('done')
     titles = [str(i) for i in range(6)]
-  #  for s in range(results['num_series']):
-   #     show_images(results['IPOP_mag'][s//2])
+    ops = results ['Magnitude'] [0]
+    ips = results ['Magnitude'] [1]
 
-    signal = get_roi_signal(results['IPOP_mag'][0], [50,100,25,25])
-    plt.plot(signal)
-    plt.show()
+    ## Fat & Water Amplitudes
+    fatAmplitudes = []
+    waterAmplitudes = []
+    Fratio = []
+
+    for s in range(len(ops)):
+        ip = np.multiply(ips [s], np.exp(-2.0/32.0))
+        ip = normalize_image (ip)
+        op = normalize_image (ops [s])
+        diff = np.subtract(ip,op)
+        twox = np.add(ip,ip)
+        fr = np.divide(diff,twox)
+        fr = np.multiply(fr,100)
+        fr = fr[100:200,100:200]
+        all = [ip,op,fr]
+        nans = np.isnan(fr)
+        sans = ~nans
+        _ = plt.hist (fr[sans], bins='auto', range=(0,20))
+        plt.show()
+
+        show_images(all)
+
 
 
 if __name__ == '__main__':

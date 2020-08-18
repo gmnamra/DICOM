@@ -12,94 +12,15 @@ import numpy as np
 import itertools
 import matplotlib.gridspec as gridspec
 import matplotlib.pyplot as plt
-
+from dicom_utils import getPixelDataFromDataset
 from operator import attrgetter
 from sklearn import preprocessing
 
-def getPixelDataFromDataset(ds):
-    """  return the pixel data from the given dataset. If the data
-    was deferred, make it deferred again, so that memory is
-    preserved. Also applies RescaleSlope and RescaleIntercept
-    if available. """
-
-    # Get data
-    data = np.array(ds.pixel_array).copy()
-
-    # Obtain slope and offset
-    slope = 1
-    offset = 0
-    needFloats = False
-    needApplySlopeOffset = False
-    if 'RescaleSlope' in ds:
-        needApplySlopeOffset = True
-        slope = ds.RescaleSlope
-    if 'RescaleIntercept' in ds:
-        needApplySlopeOffset = True
-        offset = ds.RescaleIntercept
-    if int(slope) != slope or int(offset) != offset:
-        needFloats = True
-    if not needFloats:
-        slope, offset = int(slope), int(offset)
-
-    # Apply slope and offset
-    if needApplySlopeOffset:
-
-        # Maybe we need to change the datatype?
-        if data.dtype in [np.float32, np.float64]:
-            pass
-        elif needFloats:
-            data = data.astype(np.float32)
-        else:
-            # Determine required range
-            minReq, maxReq = data.min(), data.max()
-            minReq = min(
-                    [minReq, minReq * slope + offset, maxReq * slope + offset])
-            maxReq = max(
-                    [maxReq, minReq * slope + offset, maxReq * slope + offset])
-
-            # Determine required datatype from that
-            dtype = None
-            if minReq < 0:
-                # Signed integer type
-                maxReq = max([-minReq, maxReq])
-                if maxReq < 2**7:
-                    dtype = np.int8
-                elif maxReq < 2**15:
-                    dtype = np.int16
-                elif maxReq < 2**31:
-                    dtype = np.int32
-                else:
-                    dtype = np.float32
-            else:
-                # Unsigned integer type
-                if maxReq < 2**8:
-                    dtype = np.uint8
-                elif maxReq < 2**16:
-                    dtype = np.uint16
-                elif maxReq < 2**32:
-                    dtype = np.uint32
-                else:
-                    dtype = np.float32
-
-            # Change datatype
-            if dtype != data.dtype:
-                data = data.astype(dtype)
-
-        # Apply slope and offset
-        data *= slope
-        data += offset
-
-    # Done
-    return data
-
 # %%
-def normalize_image (img):
+def normalize_image (img, norm='l2'):
+    return preprocessing.normalize (img, norm)
 
-    # l2-normalize the samples (rows).
-    return preprocessing.normalize (img, norm='l2')
-    # """ Normalize image values to [0,1] """
-    # min_, max_ = float (np.min (img)), float (np.max (img))
-    # return (img - min_) / (max_ - min_)
+
 
 
 def read_dicom (path):
@@ -283,7 +204,7 @@ def process_dicom_multi_echo (path, target_x_size=0, target_y_size=0, target_z_s
     result_dict ['MagnitudeVoxels'] = []
     for ii in range (result_dict['num_echos']):
         #@todo use ['ImageType'][2] instead of hardwiring it.
-        pxl_lst = [normalize_image(getPixelDataFromDataset(ds)) for ds in dicom_lst[ii]]
+        pxl_lst = [getPixelDataFromDataset(ds) for ds in dicom_lst[ii]]
         image_types = [ds['ImageType'][2] for ds in dicom_lst[ii]]
         mtype = [tt == 'M' for tt in image_types]
         ptypes = [tt == 'P' for tt in image_types]
@@ -293,13 +214,12 @@ def process_dicom_multi_echo (path, target_x_size=0, target_y_size=0, target_z_s
         mags = np.array ([pxl_lst [o] for o in odd])
         result_dict ['Phase'].append(phases)
         result_dict ['Magnitude'].append (mags)
-        result_dict['PhaseVoxels'].append (np.sum(phases, axis=0))
-        result_dict['MagnitudeVoxels'].append(np.sum(mags, axis=0))
 
     result_dict ['water_by_series'] = []  # number of series of number of echos / 2 pairs
     result_dict ['fat_by_series'] = []  # number of series of number of echos / 2 pairs
     result_dict ['average_water_by_series'] = []  # number of series of pairs
     result_dict ['average_fat_by_series'] = []  # number of series of pairs
+    result_dict ['opip_by_series'] = []  # number of series of pairs
     ## Number of OP, IP pairs
     opip_pairs = num_echos // 2
 
@@ -310,16 +230,19 @@ def process_dicom_multi_echo (path, target_x_size=0, target_y_size=0, target_z_s
     for s in range (len(result_dict['Magnitude'])):
         waters = []
         fats = []
+        opips = []
         # Collect inphase and out of phase
         for e in range(opip_pairs):
             oIndex = e * 2
             iIndex = oIndex + 1
-            op = normalize_image(result_dict['Magnitude'][oIndex][s])
-            ip = normalize_image(result_dict['Magnitude'][iIndex][s])
-            water = np.add(op,ip)
-            fat = np.subtract(op,ip)
+            ip = result_dict['Magnitude'][oIndex][s]
+            op = result_dict['Magnitude'][iIndex][s]
+            water = np.add(ip,op)
+            fat = np.subtract(ip,op)
             waters.append(water)
             fats.append(fat)
+            opips.append (op)
+            opips.append (ip)
         result_dict ['water_by_series'].append (waters)
         result_dict ['fat_by_series'].append (fats)
         ## Produce average water and fet images
@@ -327,6 +250,7 @@ def process_dicom_multi_echo (path, target_x_size=0, target_y_size=0, target_z_s
         avg_fat = np.mean(fats,axis=0)
         result_dict ['average_water_by_series'].append (avg_water)
         result_dict ['average_fat_by_series'].append (avg_fat)
+        result_dict['opip_by_series'].append(opips)
 
     # Produce Coarse PDFFs using (IP - OP)/ (IP + IP)
     return result_dict
@@ -374,6 +298,7 @@ def get_roi_signal(images, roi): # roi is x, y, width, height
 
     return signal
 
+from fitlib import lsqcurvefit
 
 def main():
     if len(sys.argv) < 2: return
@@ -381,9 +306,23 @@ def main():
     if not os.path.isdir(path): return
     results = process_dicom_multi_echo(path)
 
-    show_images(results['average_fat_by_series'])
+    show_images (results ['opip_by_series'][0])
+    # show_images (results ['average_fat_by_series'])
+   # show_images (results['average_water_by_series'])
 
+    loc = [75,100,1,1]
+    signal = get_roi_signal(results['opip_by_series'][0], loc)
+    print ('Water')
+    for ii in results['average_water_by_series']:
+        print(ii[loc[1],loc[0]])
 
+    print ('Fat')
+    for ii in results ['average_fat_by_series']:
+        print (ii [loc [1], loc [0]])
+
+    print(signal)
+    plt.plot(signal)
+    plt.show()
 
 
 if __name__ == '__main__':

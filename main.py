@@ -220,6 +220,7 @@ def process_dicom_multi_echo (path, target_x_size=0, target_y_size=0, target_z_s
     result_dict ['average_water_by_series'] = []  # number of series of pairs
     result_dict ['average_fat_by_series'] = []  # number of series of pairs
     result_dict ['opip_by_series'] = []  # number of series of pairs
+    result_dict ['pdff'] = []  # number of series of pairs
     ## Number of OP, IP pairs
     opip_pairs = num_echos // 2
 
@@ -251,6 +252,9 @@ def process_dicom_multi_echo (path, target_x_size=0, target_y_size=0, target_z_s
         result_dict ['average_water_by_series'].append (avg_water)
         result_dict ['average_fat_by_series'].append (avg_fat)
         result_dict['opip_by_series'].append(opips)
+        pdff = np.multiply(avg_fat, 100)
+        pdff = pdff / np.add(avg_fat, avg_water)
+        result_dict ['pdff'].append (pdff)
 
     # Produce Coarse PDFFs using (IP - OP)/ (IP + IP)
     return result_dict
@@ -306,7 +310,7 @@ def main():
     if not os.path.isdir(path): return
     results = process_dicom_multi_echo(path)
 
-    show_images (results ['opip_by_series'][0])
+    show_images (results ['pdff'])
     # show_images (results ['average_fat_by_series'])
    # show_images (results['average_water_by_series'])
 

@@ -1,315 +1,229 @@
 import numpy as np
 
-# Find all local minima of discretely evaluated function f(t) with period T
-def findMinima(f): return np.where((f < np.roll(f, 1))*(f < np.roll(f, -1)))[0]
+#!/usr/bin/env python
+
+# import libraries
+import pydicom
+import os
+import re
+import glob
+from pathlib import Path
+import numpy as np
+from dicom_utils import getPixelDataFromDataset
+
+from operator import attrgetter
+from sklearn import preprocessing
 
 
-# In each voxel, find two smallest local residual minima in a period of omega
-def findTwoSmallestMinima(J):
-    nVxl = J.shape[1]
-    A = np.zeros(nVxl, dtype=int)
-    B = np.zeros(nVxl, dtype=int)
-    for i in range(nVxl):
-        minima = sorted(findMinima(J[:, i]), key=lambda x: J[x, i])[:2]
-        if len(minima) == 2:
-            A[i], B[i] = minima
-        elif len(minima) == 1:
-            A[i] = B[i] = minima[0]
-        else:
-            A[i] = B[i] = 0  # Assign dummy minimum
-    return A, B
+# %%
+def normalize_image (img):
+
+    # l2-normalize the samples (rows).
+    return preprocessing.normalize (img, norm='l2')
+    # """ Normalize image values to [0,1] """
+    # min_, max_ = float (np.min (img)), float (np.max (img))
+    # return (img - min_) / (max_ - min_)
 
 
-def getIndexImages(nx, ny, nz):
-    left = np.zeros((nz, ny, nx), dtype=bool)
-    left[:, :, :-1] = True
-    right = np.zeros((nz, ny, nx), dtype=bool)
-    right[:, :, 1:] = True
-    down = np.zeros((nz, ny, nx), dtype=bool)
-    down[:, :-1, :] = True
-    up = np.zeros((nz, ny, nx), dtype=bool)
-    up[:, 1:, :] = True
-    below = np.zeros((nz, ny, nx), dtype=bool)
-    below[:-1, :, :] = True
-    above = np.zeros((nz, ny, nx), dtype=bool)
-    above[1:, :, :] = True
-    return (left.flatten(), right.flatten(), up.flatten(), down.flatten(),
-            above.flatten(), below.flatten())
+def read_dicom (path):
+    """
+    INPUTS:
+        path:
+            a string denoting the path
+    OUTPUT:
+        list object of dicom files
+    """
+    # regular expression search for .dcm file
+    if re.search (".dcm$", path) is not None:
+        return pydicom.dcmread (path, force=True)
+
+def sort_dicom_list (dicom_list):
+    """
+    INPUTS:
+        dicom_list:
+            an unsorted list of dicom objects
+    OUTPUT:
+        sorted list of dicom objects based off of dicom InstanceNumber
+    """
+
+    # sort according slice position so we are ALWAYS going from superior -> inferior
+    s_dicom_lst = sorted (dicom_list, key=attrgetter ('SliceLocation'), reverse=True)
+
+    return s_dicom_lst
+
+'''
+ General DICOM file 
+'''
+def process_dicom (path, target_x_size=0, target_y_size=0, target_z_size=0):
+    """
+    At some point we may want to decimate these.
+    """
+    # initialize rslt_dict
+    result_dict = {}
+
+    # read dicom files
+    dicom_files = Path (path).glob ('*.dcm')
+    files = [x for x in p if x.is_file ()]
+    dicom_lst = [read_dicom (x) for x in dicom_files]
+    dicom_lst = [x for x in dicom_lst if x is not None]
+    # sort list
+    dicom_lst = sort_dicom_list (dicom_lst)
+
+    # return image sizes to result dict
+    Nx = dicom_lst [0].Rows
+    Ny = dicom_lst [0].Columns
+
+    # @todo: decimate using interpolate when we know more
+    # perhaps downsample
+    # Nz = np.int( dicom_lst[-1].InstanceNumber - dicom_lst[0].InstanceNumber+1)
+    Nz = len (dicom_lst)
+    target_z_size = Nz
+    # also give the option using original image matrix
+    target_x_size = Nx
+    target_y_size = Ny
+
+    # the following data might not be available due to anonymization
+    try:
+        result_dict ['patientID'] = dicom_lst [0].PatientID
+        result_dict ['AcquisitionDate'] = dicom_lst [0].AcquisitionDate
+    except:
+        pass
+
+        # get the resolution of the matrix
+    scale_x = target_x_size / Nx
+    scale_y = target_y_size / Ny
+    scale_z = target_z_size / Nz
+    result_dict ['image_scale'] = (scale_x, scale_y, scale_z)
+    x_sampling = np.float (dicom_lst [0].PixelSpacing [0])
+    y_sampling = np.float (dicom_lst [0].PixelSpacing [1])
+    z_sampling = np.float (dicom_lst [0].SliceThickness)
+    result_dict ['image_resolution'] = (x_sampling * scale_x, y_sampling * scale_y, z_sampling * scale_z)
+
+    # make a list and cast as 3D matrix
+    pxl_lst = [x.astype('float32').pixel_array for x in dicom_lst]
+
+    pxl_mtx = pxl_lst
+    #pxl_mtx = linear_interpolate (pxl_lst, target_z_size)
+    result_dict ['image_data'] = pxl_lst
+    return result_dict
 
 
-# 2D measure of isotropy defined as
-# the square area over the square perimeter (area normalized to 1)
-def isotropy2D(dx, dy): return np.sqrt(dx*dy)/(2*(dx+dy))
+def sort_dicom_list_multiEchoes (dicom_list):
+    """
+    This function sorts 1st by instance number and then by echo number
+    note that echo numbers and echo time correspond
+    returns a 2-dimensional list of images with same echoes into one list
+
+    """
+    s_dicom_lst = sorted (dicom_list, key=attrgetter ('InstanceNumber'))
+    ss_dicom_lst = sorted (s_dicom_lst, key=attrgetter ('EchoNumbers'))
+    num_echoes = ss_dicom_lst [-1].EchoNumbers
+    dicom_list_groupedby_echoNumber = [None] * num_echoes
+    for ii in range (num_echoes):
+        tmp_list = []
+        for dicomObj in ss_dicom_lst:
+            if dicomObj.EchoNumbers == ii + 1:
+                tmp_list.append (dicomObj)
+        dicom_list_groupedby_echoNumber [ii] = tmp_list
+
+    return dicom_list_groupedby_echoNumber
 
 
-# 3D measure of isotropy defined as
-# the cube volume over the cube area (volume normalized to 1)
-def isotropy3D(dx, dy, dz): return (dx*dy*dz)**(2/3)/(2*(dx*dy+dx*dz+dy*dz))
+'''
+    Multi_Echo MRI file. 
+    Sorts by instance number and echo number / echo time
+'''
+def process_dicom_multi_echo (path, target_x_size=0, target_y_size=0, target_z_size=0):
+    result_dict = {}
+    # store files and append path
+    dicom_files = glob.glob (os.path.join (path, "*.dcm"))
+    # dicom_files = [path + "/" + x for x in dicom_files]
+
+    # read dicom files
+    dicom_lst = [read_dicom (x) for x in dicom_files]
+    dicom_lst = [x for x in dicom_lst if x is not None]
+    echo_times = {}
+    for dst in dicom_lst:
+        echo_times[dst.EchoNumber] = dst.EchoTime
+
+    # sort list
+    # this return a 2-dimension list with all dicom image objects within the same
+    # echo number store in the same list
+    dicom_lst = sort_dicom_list_multiEchoes (dicom_lst)
+    result_dict['num_echos'] = len (dicom_lst)
+    result_dict['num_series'] = len (dicom_lst [1])
+    result_dict ['scanning_sequence'] = dicom_lst [0] [0].ScanningSequence
+    result_dict ['sequence_variant'] = dicom_lst [0] [0].SequenceVariant
+    result_dict ['magnetic_field_strength'] = dicom_lst[0] [0].MagneticFieldStrength
+    result_dict ['flip_angle'] = dicom_lst[0] [0].FlipAngle
+    result_dict ['TR'] = dicom_lst[0][0].RepetitionTime
 
 
-def getHigherLevel(level):
-    high = {'L': level['L']+1}
-    # Isotropy promoting downsampling
-    maxIsotropy = 0
-    for sx in [1, 2]:
-        for sy in [1, 2]:
-            for sz in [1, 2]:  # Loop over all 2^3=8 downscaling combinations
-                # at least one dimension must change and the size of all
-                # dimensions at lower level must permit any downscaling
-                if (sx*sy*sz > 1 and level['nx'] >= sx and
-                   level['ny'] >= sy and level['nz'] >= sz):
-                    if (level['nx'] == 1):
-                        iso = isotropy2D(level['dy']*sy, level['dz']*sz)
-                    elif (level['ny'] == 1):
-                        iso = isotropy2D(level['dx']*sx, level['dz']*sz)
-                    elif (level['nz'] == 1):
-                        iso = isotropy2D(level['dx']*sx, level['dy']*sy)
-                    else:
-                        iso = isotropy3D(
-                          level['dx']*sx, level['dy']*sy, level['dz']*sz)
-                    if iso > maxIsotropy:
-                        maxIsotropy = iso
-                        high['sx'] = sx
-                        high['sy'] = sy
-                        high['sz'] = sz
-    high['dx'] = level['dx']*high['sx']
-    high['dy'] = level['dy']*high['sy']
-    high['dz'] = level['dz']*high['sz']
 
-    high['nx'] = int(np.ceil(level['nx']/high['sx']))
-    high['ny'] = int(np.ceil(level['ny']/high['sy']))
-    high['nz'] = int(np.ceil(level['nz']/high['sz']))
-    return high
+    # reports back the first and last instance number of the image sequence
+    result_dict ['first_instance_number'] = dicom_lst [0] [0].InstanceNumber
+    result_dict ['last_instance_number'] = dicom_lst [-1] [-1].InstanceNumber
+    Nimg = np.abs ((result_dict ['last_instance_number'] - result_dict ['first_instance_number']) + 1)
+    # return image sizes to result dict
+    Nz = 6 #np.int (Nimg / num_echoes)
+    Ny = np.int (dicom_lst [0] [0].Rows)
+    Nx = np.int (dicom_lst [0] [0].Columns)
+    # the following data might not be available due to anonymization
+    try:
+        result_dict ['patientID'] = dicom_lst [0] [0].PatientID
+        result_dict ['AcquisitionDate'] = dicom_lst [0] [0].AcquisitionDate
+        result_dict ['ScanningSequence'] = dicom_lst [0][0].ScanningSequence
+    except:
+        pass
+    # make a list and cast as 3D matrix for each echo
+    # give the option that don't interpolate along the z-axis if 2-D processing
+    if target_z_size == 0:
+        target_z_size = Nz
+    # also give the option using original image matrix
+    if target_x_size == 0:
+        target_x_size = Nx
 
+    if target_y_size == 0:
+        target_y_size = Ny
 
-def getHighLevelResidualImage(J, high, level):
-    Jlow = np.zeros((J.shape[0], level['nz']+level['nz'] % high['sz'],
-                     level['ny']+level['ny'] % high['sy'],
-                     level['nx']+level['nx'] % high['sx']))
-    Jlow[:, :level['nz'], :level['ny'], :level['nx']] = J.reshape(
-        J.shape[0], level['nz'], level['ny'], level['nx'])
+    scale_x = target_x_size / Nx
+    scale_y = target_y_size / Ny
+    scale_z = target_z_size / Nz
+    result_dict ['image_scale'] = (scale_x, scale_y, scale_z)
+    x_sampling = np.float (dicom_lst [0] [0].PixelSpacing [0])
+    y_sampling = np.float (dicom_lst [0] [0].PixelSpacing [1])
+    z_sampling = np.float (dicom_lst [0] [0].SliceThickness)
+    result_dict ['image_resolution'] = (x_sampling * scale_x, y_sampling * scale_y, z_sampling * scale_z)
+    result_dict['Phase'] = []
+    result_dict['Magnitude'] = []
+    result_dict ['PhaseVoxels'] = []
+    result_dict ['MagnitudeVoxels'] = []
+    for ii in range (result_dict['num_echos']):
+        #@todo use ['ImageType'][2] instead of hardwiring it.
+        pxl_lst = [normalize_image(getPixelDataFromDataset(ds)) for ds in dicom_lst[ii]]
+        image_types = [ds['ImageType'][2] for ds in dicom_lst[ii]]
+        mtype = [tt == 'M' for tt in image_types]
+        ptypes = [tt == 'P' for tt in image_types]
+        even = range(0, len(dicom_lst[ii]), 2)
+        odd = range(1,len(dicom_lst[ii]), 2)
+        phases = np.array ([pxl_lst [e] for e in even])
+        mags = np.array ([pxl_lst [o] for o in odd])
+        result_dict ['Phase'].append(phases)
+        result_dict ['Magnitude'].append (mags)
+        result_dict['PhaseVoxels'].append (np.sum(phases, axis=0))
+        result_dict['MagnitudeVoxels'].append(np.sum(mags, axis=0))
 
-    Jhigh = np.zeros((J.shape[0], high['nz'], high['ny'], high['nx']))
+    ## Collect magnitude In / Out phase sets. i.e. accross TEs for each series
+    ## Create average Ip OP images to generate 2 point dixon water and fat images
 
-    Jhigh = Jlow[:, ::high['sz'], ::high['sy'], ::high['sx']]
-    if high['sx'] > 1:
-        Jhigh += Jlow[:, ::high['sz'], ::high['sy'], 1::high['sx']]
-    if high['sy'] > 1:
-        Jhigh += Jlow[:, ::high['sz'], 1::high['sy'], ::high['sx']]
-    if high['sz'] > 1:
-        Jhigh += Jlow[:, 1::high['sz'], ::high['sy'], ::high['sx']]
-    if high['sx'] > 1 and high['sy'] > 1:
-        Jhigh += Jlow[:, ::high['sz'], 1::high['sy'], 1::high['sx']]
-    if high['sx'] > 1 and high['sz'] > 1:
-        Jhigh += Jlow[:, 1::high['sz'], ::high['sy'], 1::high['sx']]
-    if high['sy'] > 1 and high['sz'] > 1:
-        Jhigh += Jlow[:, 1::high['sz'], 1::high['sy'], ::high['sx']]
-    if high['sx'] > 1 and high['sy'] > 1 and high['sz'] > 1:
-        Jhigh += Jlow[:, 1::high['sz'], 1::high['sy'], 1::high['sx']]
+    result_dict ['IPOP_mag'] = []
+    for s in range (result_dict['num_series']):
+        selecs = []
+        for e in range(result_dict['num_echos']):
+            selecs.append (result_dict['Magnitude'] [e] [s//2])
+        result_dict ['IPOP_mag'].append(selecs)
 
-    # scale result
-    return Jhigh.reshape(Jhigh.shape[0], -1)/(high['sx']*high['sy']*high['sz'])
-
-
-def getB0fromHighLevel(dB0high, level, high):
-    dB0 = np.empty((high['nz']*high['sz'], high['ny']*high['sy'],
-                    high['nx']*high['sx']), dtype=int)
-    dB0[::high['sz'], ::high['sy'], ::high['sx']] = dB0high
-    if high['sx'] > 1:
-        dB0[::high['sz'], ::high['sy'], 1::high['sx']] = dB0high
-    if high['sy'] > 1:
-        dB0[::high['sz'], 1::high['sy'], ::high['sx']] = dB0high
-    if high['sz'] > 1:
-        dB0[1::high['sz'], ::high['sy'], ::high['sx']] = dB0high
-    if high['sx'] > 1 and high['sy'] > 1:
-        dB0[::high['sz'], 1::high['sy'], 1::high['sx']] = dB0high
-    if high['sx'] > 1 and high['sz'] > 1:
-        dB0[1::high['sz'], ::high['sy'], 1::high['sx']] = dB0high
-    if high['sy'] > 1 and high['sz'] > 1:
-        dB0[1::high['sz'], 1::high['sy'], ::high['sx']] = dB0high
-    if high['sx'] > 1 and high['sy'] > 1 and high['sz'] > 1:
-        dB0[1::high['sz'], 1::high['sy'], 1::high['sx']] = dB0high
-    return dB0[:level['nz'], :level['ny'], :level['nx']].flatten()
-
-
-# Calculate initial phase phi according to
-# Bydder et al. MRI 29 (2011): 216-221.
-def getPhi(Y, D):
-    phi = np.zeros((Y.shape[1]))
-    for i in range(Y.shape[1]):
-        y = Y[:, i]
-        phi[i] = .5*np.angle(np.dot(np.dot(y.transpose(), D), y))
-    return phi
-
-
-# Calculate phi, remove it from Y and return separate real and imag parts
-def getRealDemodulated(Y, D):
-    phi = getPhi(Y, D)
-    y = Y/np.exp(1j*phi)
-    return np.concatenate((np.real(y), np.imag(y))), phi
-
-
-# Calculate LS error J as function of B0
-def getB0Residuals(Y, C, nB0, nVxl, iR2cand, D=None):
-    J = np.zeros(shape=(nB0, nVxl))
-    # TODO: loop over all R2candidates
-    r = 0
-    for b in range(nB0):
-        if not D:  # complex-valued estimates
-            y = Y
-        else:  # real-valued estimates
-            y, phi = getRealDemodulated(Y, D[r][b])
-        J[b, :] = np.linalg.norm(np.dot(C[iR2cand[r]][b], y), axis=0)**2
-    return J
-
-
-# Construct modulation vectors for each B0 value
-def modulationVectors(nB0, N):
-    B, Bh = [], []
-    for b in range(nB0):
-        omega = 2.*np.pi*b/nB0
-        B.append(np.eye(N)+0j*np.eye(N))
-        for n in range(N):
-            B[b][n, n] = np.exp(complex(0., n*omega))
-        Bh.append(B[b].conj())
-    return B, Bh
-
-
-# Construct matrix RA
-def modelMatrix(dPar, mPar, R2):
-    RA = np.zeros(shape=(dPar.N, mPar.M))+1j*np.zeros(shape=(dPar.N, mPar.M))
-    for n in range(dPar.N):
-        t = dPar.t1+n*dPar.dt
-        RA[n, 0] = np.exp(complex(-(t-dPar.t1)*R2, 0))  # Water resonance
-        for p in range(1, mPar.P):  # Loop over fat resonances
-            # Chemical shift between water and peak m (in ppm)
-            omega = 2.*np.pi*gyro*dPar.B0*(mPar.CS[p]-mPar.CS[0])
-            RA[n, 1] += mPar.alpha[1][p]*np.exp(complex(-(t-dPar.t1)*R2, t*omega))
-    return RA
-
-
-# Get matrix Dtmp defined so that D = Bconj*Dtmp*Bh
-# Following Bydder et al. MRI 29 (2011): 216-221.
-def getDtmp(A):
-    Ah = A.conj().T
-    inv = np.linalg.inv(np.real(np.dot(Ah, A)))
-    Dtmp = np.dot(A.conj(), np.dot(inv, Ah))
-    return Dtmp
-
-
-# Separate and concatenate real and imag parts of complex matrix M
-def realify(M):
-    R = np.real(M)
-    I = np.imag(M)
-    return np.concatenate((np.concatenate((R, I)), np.concatenate((-I, R))), 1)
-
-
-# Get mean square signal magnitude within foreground
-def getMeanEnergy(Y):
-    energy = np.linalg.norm(Y, axis=0)**2
-    thres = threshold_otsu(energy)
-    return np.mean(energy[energy >= thres])
-
-
-# Perform the actual reconstruction
-def reconstruct(dPar, aPar, mPar, B0map=None, R2map=None):
-    determineB0 = aPar.graphcutLevel < 20 or aPar.nICMiter > 0
-    nR2 = aPar.nR2
-    determineR2 = nR2 > 1
-    if (nR2 < 0):
-        nR2 = -nR2  # nR2<(-1) will use input R2map
-
-    nVxl = dPar.nx*dPar.ny*dPar.nz
-
-    Y = dPar.img
-    Y.shape = (dPar.N, nVxl)
-
-    # Prepare matrices
-    # Off-resonance modulation vectors (one for each off-resonance value)
-    B, Bh = modulationVectors(aPar.nB0, dPar.N)
-    RA, RAp, C, Qp = [], [], [], []
-    D = None
-    if aPar.realEstimates:
-        D = []  # Matrix for calculating phi (needed for real-valued estimates)
-    for r in range(nR2):
-        R2 = r*aPar.R2step
-        RA.append(modelMatrix(dPar, mPar, R2))
-        if aPar.realEstimates:
-            D.append([])
-            Dtmp = getDtmp(RA[r])
-            for b in range(aPar.nB0):
-                D[r].append(np.dot(B[b].conj(), np.dot(Dtmp, Bh[b])))
-            RA[r] = np.concatenate((np.real(RA[r]), np.imag(RA[r])))
-        RAp.append(np.linalg.pinv(RA[r]))
-
-    if aPar.realEstimates:
-        for b in range(aPar.nB0):
-            B[b] = realify(B[b])
-            Bh[b] = realify(Bh[b])
-    for r in range(nR2):
-        C.append([])
-        Qp.append([])
-        # Null space projection matrix
-        proj = np.eye(dPar.N*(1+aPar.realEstimates))-np.dot(RA[r], RAp[r])
-        for b in range(aPar.nB0):
-            C[r].append(np.dot(np.dot(B[b], proj), Bh[b]))
-            Qp[r].append(np.dot(RAp[r], Bh[b]))
-
-    # For B0 index -> off-resonance in ppm
-    B0step = 1.0/aPar.nB0/dPar.dt/gyro/dPar.B0
-    if determineB0:
-        V = []  # Precalculate discontinuity costs
-        for b in range(aPar.nB0):
-            V.append(min(b**2, (b-aPar.nB0)**2))
-        V = np.array(V)
-
-        level = {'L': 0, 'nx': dPar.nx, 'ny': dPar.ny, 'nz': dPar.nz,
-                 'sx': 1, 'sy': 1, 'sz': 1,
-                 'dx': dPar.dx, 'dy': dPar.dy, 'dz': dPar.dz}
-        J = getB0Residuals(Y, C, aPar.nB0, nVxl, aPar.iR2cand, D)
-        offresPenalty = aPar.offresPenalty
-        if aPar.offresPenalty > 0:
-            offresPenalty *= getMeanEnergy(Y)
-
-        dB0 = calculateFieldMap(aPar.nB0, level, aPar.graphcutLevel,
-                                aPar.multiScale, aPar.maxICMupdate,
-                                aPar.nICMiter, J, V, aPar.mu,
-                                offresPenalty, int(dPar.offresCenter/B0step))
-    elif B0map is None:
-        dB0 = np.zeros(nVxl, dtype=int)
-    else:
-        dB0 = np.array(B0map/B0step, dtype=int)
-
-    if determineR2:
-        J = getR2Residuals(Y, dB0, C, aPar.nB0, nR2, nVxl, D)
-        R2 = greedyR2(J, nVxl)
-
-    # Find least squares solution given dB0 and R2
-    rho = np.zeros(shape=(mPar.M, nVxl))+1j*np.zeros(shape=(mPar.M, nVxl))
-    for r in range(nR2):
-        for b in range(aPar.nB0):
-            vxls = (dB0 == b)*(R2 == r)
-            if not D:  # complex estimates
-                y = Y[:, vxls]
-            else:  # real-valued estimates
-                y, phi = getRealDemodulated(Y[:, vxls], D[r][b])
-            rho[:, vxls] = np.dot(Qp[r][b], y)
-            if D:
-                #  Assert phi is the phase angle of water
-                phi[rho[0, vxls] < 0] += np.pi
-                rho[:, vxls] *= np.exp(1j*phi)
-
-    if B0map is None:
-        B0map = np.zeros(nVxl, dtype=IMGTYPE)
-    if R2map is None:
-        R2map = np.empty(nVxl, dtype=IMGTYPE)
-
-    if determineR2:
-        R2map[:] = R2*aPar.R2step
-
-    if determineB0:
-        B0map[:] = dB0*B0step
-
-    return rho, B0map, R2map
+    # Produce Coarse PDFFs using (IP - OP)/ (IP + IP)
+    return result_dict
 
 

@@ -15,6 +15,7 @@ import matplotlib.pyplot as plt
 from dicom_utils import getPixelDataFromDataset
 from operator import attrgetter
 from sklearn import preprocessing
+import math
 
 # %%
 def normalize_image (img, norm='l2'):
@@ -202,8 +203,14 @@ def process_dicom_multi_echo (path, target_x_size=0, target_y_size=0, target_z_s
     result_dict['Magnitude'] = []
     result_dict ['PhaseVoxels'] = []
     result_dict ['MagnitudeVoxels'] = []
+    ## We are sorted by echo number.
+    ## There are S series each having mag and phase sub series.
     for ii in range (result_dict['num_echos']):
         #@todo use ['ImageType'][2] instead of hardwiring it.
+        dst = dicom_lst[ii]
+        for ds in dicom_lst[ii]:
+            print('%s,%d'%(ds.SeriesTime, ds.EchoNumbers))
+
         pxl_lst = [getPixelDataFromDataset(ds) for ds in dicom_lst[ii]]
         image_types = [ds['ImageType'][2] for ds in dicom_lst[ii]]
         mtype = [tt == 'M' for tt in image_types]
@@ -304,14 +311,13 @@ def get_roi_signal(images, roi): # roi is x, y, width, height
 
 from fitlib import lsqcurvefit
 
-def main():
-    if len(sys.argv) < 2: return
-    path = sys.argv[1]
-    if not os.path.isdir(path): return
+def main_dicom(path):
+
     results = process_dicom_multi_echo(path)
 
     show_images (results ['pdff'])
-    # show_images (results ['average_fat_by_series'])
+    show_images (results ['opip_by_series'][0])
+
    # show_images (results['average_water_by_series'])
 
     loc = [75,100,1,1]
@@ -328,7 +334,59 @@ def main():
     plt.plot(signal)
     plt.show()
 
+def fat_peaks_integral (te_seconds):
+    dfp = [39,-32,-125,-166,-217,-243]
+    drp = [0.047,0.039,0.006,0.120,0.700,0.088]
+    ppms = [5.3,4.2,2.75,2.10,1.3,0.9]
+    isum = 0
+    for i in range(6):
+        dd = drp[i] * math.exp(2*math.pi*dfp[i]*te_seconds)
+        isum = isum + dd
+    return isum
+
+def func(x,tmsec,y):
+    s1 = x[0]
+    s2 = x[1]
+    t2s = x[2]
+    out = []
+    for tt in tmsec:
+        t = tt / 1000
+        fpi = fat_peaks_integral(t)
+        st = s1 * s1 + s2 * s2 * fpi * fpi + 2 * s1 * s2 * fpi
+        st = math.sqrt(st) * math.exp(-t/t2s) * 100
+        out.append(st)
+    outa = np.array(out)
+    ya = np.array(y)
+    return outa - ya
+
+from scipy.optimize import least_squares
+
+def main_fit():
+    v20 = [15,18,13,17,10,14]
+    v10 = [18,20,14,16,11,13]
+    v1 = [25,26,22,24,18,21]
+    pdff_1 = 5.0  # 45, 2.66
+    pdff_10 = 6.2  # 30, 2.3
+    pdff_20 = 12.5  # 30, 4.3
+
+    tes = [1.2,3.2,5.2,7.2,9.2,11.2]
+    e = np.zeros((1,6), dtype=float)
+    vsys = 0.010
+    water = 0.30
+    fat = 0.043
+    signal = v20
+
+    e = func([water,fat,vsys],tes,signal)
+
+    res_lsq = least_squares(func, [0.010,0.3,0.043], args = (tes, signal))
+    print (res_lsq)
+
 
 if __name__ == '__main__':
-    main ()
+    if len (sys.argv) < 2: sys.exit(1)
+    path = sys.argv [1]
+    if not os.path.isdir (path): sys.exit(1)
+
+    main_fit()
+    #main_dicom (path)
 

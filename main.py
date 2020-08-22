@@ -243,10 +243,10 @@ def process_dicom_multi_echo (path, target_x_size=0, target_y_size=0, target_z_s
         for e in range(opip_pairs):
             oIndex = e * 2
             iIndex = oIndex + 1
-            ip = result_dict['Magnitude'][oIndex][s]
-            op = result_dict['Magnitude'][iIndex][s]
+            op = result_dict['Magnitude'][oIndex][s]
+            ip = result_dict['Magnitude'][iIndex][s]
             water = np.add(ip,op)
-            fat = np.subtract(ip,op)
+            fat = np.abs(np.subtract(ip.astype('int16'),op.astype('int16')))
             waters.append(water)
             fats.append(fat)
             opips.append (op)
@@ -320,7 +320,7 @@ def main_dicom(path):
 
    # show_images (results['average_water_by_series'])
 
-    loc = [75,100,1,1]
+    loc = [67,128,1,1]
     signal = get_roi_signal(results['opip_by_series'][0], loc)
     print ('Water')
     for ii in results['average_water_by_series']:
@@ -360,26 +360,39 @@ def func(x,tmsec,y):
     return outa - ya
 
 from scipy.optimize import least_squares
+from scipy.optimize import curve_fit
+
+def func2(x,a, b, c):
+    return a * np.exp(-b * x) + c
 
 def main_fit():
     v20 = [15,18,13,17,10,14]
     v10 = [18,20,14,16,11,13]
-    v1 = [25,26,22,24,18,21]
+    v1 = [17.0, 18.0, 16.0, 16.0, 14.0, 14.0]
     pdff_1 = 5.0  # 45, 2.66
     pdff_10 = 6.2  # 30, 2.3
     pdff_20 = 12.5  # 30, 4.3
 
     tes = [1.2,3.2,5.2,7.2,9.2,11.2]
     e = np.zeros((1,6), dtype=float)
-    vsys = 0.010
-    water = 0.30
-    fat = 0.043
-    signal = v20
+    vsys = 0.020
+    water = 0.31
+    fat = 0.0033
+    signal = v1
 
     e = func([water,fat,vsys],tes,signal)
 
-    res_lsq = least_squares(func, [0.010,0.3,0.043], args = (tes, signal))
+    res_lsq = least_squares(func, [vsys, water, fat], args = (tes, signal))
     print (res_lsq)
+
+    xdata = np.linspace(0,4,50)
+    y = func2(xdata, 2.5, 1.3, 0.5)
+    ydata = y + 0.2 * np.random.normal(size=len(xdata))
+    popt, pcov = curve_fit(func2, xdata, ydata)
+    print(popt)
+    print(pcov)
+
+
 
 
 if __name__ == '__main__':
@@ -388,5 +401,5 @@ if __name__ == '__main__':
     if not os.path.isdir (path): sys.exit(1)
 
     main_fit()
-    #main_dicom (path)
+    main_dicom (path)
 

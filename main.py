@@ -274,7 +274,14 @@ def get_roi_signal(images, roi): # roi is x, y, width, height
 
     return np.array(signal)
 
+'''
+ Bydder M, Yokoo T, Hamilton G, et al.
+ Relaxation effects in the quantification of fat using gradient echo imaging. 
+ Magn Reson Imaging. 2008;26(3):347-359. doi:10.1016/j.mri.2007.08.012
 
+ Section 1.1.3 equation 11. model 4 constraints
+
+'''
 def generate(x,tmsec):
     s1 = x[0]
     s2 = x[1]
@@ -282,6 +289,8 @@ def generate(x,tmsec):
     v1 = vsys
     v2 = vsys + 1/0.012
     out = []
+    # the separation between two checmical components for 1.5 T it needs to be 4.6 msec.
+    # however the TEs are not 2.3 msec separated. I use 3.6 msec which seemed ok for all cases.
     w = 2* math.pi / 0.0036
     for tt in tmsec:
         t = tt / 1000

@@ -14,6 +14,7 @@ from dicom_utils import getPixelDataFromDataset, normalize_minmax_nan_image
 from operator import attrgetter
 import math
 from matplotlib.widgets import EllipseSelector
+from scipy.optimize import least_squares
 
 
 def read_dicom (path):
@@ -263,13 +264,7 @@ def show_images (images, cols=1, titles=None):
     fig.set_size_inches (np.array (fig.get_size_inches ()) * n_images)
     plt.show ()
 
-# function to display images
-def display(images):
-    selecs = []
-    for col in range(6):
-        selecs.append(images[col][5])
 
-    show_images(selecs)
 
 def get_roi_signal(images, roi): # roi is x, y, width, height
     signal = []
@@ -278,17 +273,6 @@ def get_roi_signal(images, roi): # roi is x, y, width, height
         signal.append(np.mean(area))
 
     return np.array(signal)
-
-def fat_peaks_integral (te_seconds):
-    dfp = [39,-32,-125,-166,-217,-243]
-    drp = [0.047,0.039,0.006,0.120,0.700,0.088]
-    ppms = [5.3,4.2,2.75,2.10,1.3,0.9]
-    isum = 0
-    for i in range(6):
-        dd = drp[i] * math.exp(2*math.pi*dfp[i]*te_seconds)
-        isum = isum + dd
-    return isum
-
 
 
 def generate(x,tmsec):
@@ -309,13 +293,10 @@ def generate(x,tmsec):
 def func(x,tmsec,y):
     return generate(x,tmsec) - y
 
-from scipy.optimize import least_squares
-from scipy.optimize import curve_fit
 
-def func2(x,a, b, c):
-    return a * np.exp(-b * x) + c
-
-
+'''
+ fit voxel to the model, return fit results and voxel generated from the fit results
+'''
 def signal_fit(signal, water,fat, t2r):
     tes = [1.2,3.2,5.2,7.2,9.2,11.2]
     e = np.zeros((1,6), dtype=float)
@@ -323,15 +304,6 @@ def signal_fit(signal, water,fat, t2r):
     res_lsq = least_squares(func, [water, fat, t2r], method='lm', args = (tes, signal))
     e = generate(res_lsq.x, tes)
     return res_lsq, e
-
-def curve_fit_example():
-    xdata = np.linspace(0,4,50)
-    y = func2(xdata, 2.5, 1.3, 0.5)
-    ydata = y + 0.2 * np.random.normal(size=len(xdata))
-    popt, pcov = curve_fit(func2, xdata, ydata)
-    print(popt)
-    print(pcov)
-
 
 
 def main_dicom(path):
@@ -363,7 +335,6 @@ def main_dicom(path):
 
     def run_location(loc, results):
         signal = get_roi_signal(results['MedianMagnitude'], loc)
-        print ('Water')
         ii = results['water']
         pwater = ii[loc[1],loc[0]]
         ii = results ['fat']
@@ -371,19 +342,18 @@ def main_dicom(path):
         ii = results ['pdff']
         pdff = ii [loc [1], loc [0]] / 10
         ii = results ['T2*']
-        print('T2* %f'%(ii[loc[1], loc[0]]))
 
         res_lsq, e = signal_fit(signal / 100, pwater / 100, pfat / 100, 0.0)
-        print(res_lsq)
-        print(e)
+        ncv = np.corrcoef (signal, e)
+        fit_quality = ncv [0] [1]
         hist, edges = np.histogram(results['pdff'], bins=range(500))
         fitted = res_lsq.x
         fitted_water = math.fabs(fitted[0]) * 100
         fitted_fat = math.fabs(fitted[1]) * 100
         fitted_pdff = (fitted_fat) * 100 / (fitted_fat + fitted_water)
 
-        output = "{id} \n @ ({x},{y} path_size = {ps}]\n \n Signal Based: \n\n [{pw:2.2f},{pf:2.2f}] -> {pff:2.2f} \n \n Model Based \n\n[{epw:2.2f},{epf:2.2f}] -> {epff:2.2f} ".format \
-            (id=id_str, x=loc[0],y=loc[1], ps=loc[3], pw=pwater, pf=pfat,pff=pdff, epw= fitted_water, epf= fitted_fat, epff=fitted_pdff)
+        output = "{id} \n \n Area: x  {x},y  {y} path_size = {ps}\n \n Signal Based ( Pct ): \n\n water {pw:2.2f}, fat {pf:2.2f} pdff {pff:2.2f} \n \n Model Based ( Pct ): \n\n water {epw:2.2f}, fat {epf:2.2f} pdff {epff:2.2f} \n\n Fit Quality {ncv:1.4f}".format \
+            (id=id_str, x=loc[0],y=loc[1], ps=loc[3], pw=pwater, pf=pfat,pff=pdff, epw= fitted_water, epf= fitted_fat, epff=fitted_pdff, ncv=fit_quality)
         print (output)
         instant_results = {}
         instant_results['results'] = results
@@ -412,6 +382,7 @@ def main_dicom(path):
         output = instant_results ['output']
         roi = instant_results['loc']
         patch = results['pdff'][roi[1]:roi[1]+roi[3],roi[0]:roi[0]+roi[2]]
+
 
         fig, axs = plt.subplots(2, 4, figsize=(20, 10), frameon=False,
                               subplot_kw={'xticks': [], 'yticks': []})
@@ -443,9 +414,9 @@ def main_dicom(path):
         secax = axs[1,2].secondary_xaxis ('top', functions=(fine2coarse, coarse2fine))
         secax.set_xlabel ('hist [%]')
 
-        axs [1, 3].text (0.5, 0.75, output, verticalalignment='top', horizontalalignment='center',
+        axs [1, 3].text (0.05, 0.85, output, verticalalignment='top', horizontalalignment='left',
                          transform=axs [1, 3].transAxes,
-                         color='green', fontsize=15)
+                         color='green', fontsize=13)
         toggle_selector.ES = EllipseSelector (axs[0, 2], onselect, drawtype='line', lineprops=dict(color="red", linestyle="-", linewidth=2, alpha=0.5))
         fig.canvas.mpl_connect ('key_press_event', toggle_selector)
 

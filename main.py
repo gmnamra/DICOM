@@ -336,6 +336,9 @@ def curve_fit_example():
 
 def main_dicom(path):
 
+    results = process_dicom_multi_echo (path)
+    id_str = Path (path).stem
+
     def onselect (eclick, erelease):
         "eclick and erelease are matplotlib events at press and release."
         print ('startposition: (%f, %f)' % (eclick.xdata, eclick.ydata))
@@ -344,7 +347,8 @@ def main_dicom(path):
         ctr = [int((eclick.xdata + erelease.xdata) / 2.0), int((eclick.ydata + erelease.ydata) / 2.0)]
         patch = [int(math.fabs(eclick.xdata - erelease.xdata) / 2.0) , int(math.fabs(eclick.ydata - erelease.ydata) / 2.0)]
         loc = [ctr[0],ctr[1],patch[0],patch[1]]
-        run_location(loc)
+        insr = run_location(loc, results)
+        plot_instant_result (insr)
 
     def toggle_selector (event):
         print (' Key pressed.')
@@ -355,10 +359,9 @@ def main_dicom(path):
             print ('EllipseSelector activated.')
             toggle_selector.ES.set_active (True)
 
-    results = process_dicom_multi_echo(path)
-    id_str = Path(path).stem
 
-    def run_location(loc):
+
+    def run_location(loc, results):
         signal = get_roi_signal(results['MedianMagnitude'], loc)
         print ('Water')
         ii = results['water']
@@ -379,12 +382,19 @@ def main_dicom(path):
         fitted_fat = math.fabs(fitted[1]) * 100
         fitted_pdff = (fitted_fat) * 100 / (fitted_fat + fitted_water)
 
-        output = "{id} \n\n @ ({x},{y} path_size = {ps}]\n \n Signal Based: \n\n [{pw:2.2f},{pf:2.2f}] -> {pff:2.2f} \n \n Model Based \n\n[{epw:2.2f},{epf:2.2f}] -> {epff:2.2f} ".format \
+        output = "{id} \n @ ({x},{y} path_size = {ps}]\n \n Signal Based: \n\n [{pw:2.2f},{pf:2.2f}] -> {pff:2.2f} \n \n Model Based \n\n[{epw:2.2f},{epf:2.2f}] -> {epff:2.2f} ".format \
             (id=id_str, x=loc[0],y=loc[1], ps=loc[3], pw=pwater, pf=pfat,pff=pdff, epw= fitted_water, epf= fitted_fat, epff=fitted_pdff)
         print (output)
-        return signal, e, output, hist
+        instant_results = {}
+        instant_results['results'] = results
+        instant_results['signal'] = signal
+        instant_results['e'] = e
+        instant_results['hist'] = hist
+        instant_results['output'] = output
+        instant_results['loc'] = loc
 
-    signal, e, output, hist = run_location([75,100, 8, 8])
+        return instant_results
+
 
     class Formatter (object):
         def __init__ (self, im):
@@ -394,44 +404,56 @@ def main_dicom(path):
             z = self.im.get_array () [int (y), int (x)]
             return 'x={:.01f}, y={:.01f}, z={:.01f}'.format (x, y, z)
 
+    def plot_instant_result(instant_results):
+        results = instant_results['results']
+        signal = instant_results ['signal']
+        e = instant_results ['e']
+        hist = instant_results ['hist']
+        output = instant_results ['output']
+        roi = instant_results['loc']
+        patch = results['pdff'][roi[1]:roi[1]+roi[3],roi[0]:roi[0]+roi[2]]
 
-    fig, axs = plt.subplots(2, 4, figsize=(20, 10), frameon=False,
-                          subplot_kw={'xticks': [], 'yticks': []})
-    axs[0, 0].imshow(results ['MedianMagnitude'][0], cmap='gray')
-    axs[0, 0].set_title('Median IP')
-    axs [0, 1].imshow (results ['MedianMagnitude'] [1], cmap='gray')
-    axs[0, 1].set_title('Median OP')
-    im = axs[0, 2].imshow (results ['pdff'], interpolation='none', cmap='gray')
-    axs[0, 2].format_coord = Formatter (im)
-    axs[0, 2].set_title('PDFF')
+        fig, axs = plt.subplots(2, 4, figsize=(20, 10), frameon=False,
+                              subplot_kw={'xticks': [], 'yticks': []})
+        axs[0, 0].imshow(results ['MedianMagnitude'][0], cmap='gray')
+        axs[0, 0].set_title('Median IP')
+        axs [0, 1].imshow (results ['MedianMagnitude'] [1], cmap='gray')
+        axs[0, 1].set_title('Median OP')
+        im = axs[0, 2].imshow (results ['pdff'], interpolation='none', cmap='gray')
+        axs[0, 2].format_coord = Formatter (im)
+        axs [0, 2].set_title ('PDFF')
+        axs[0, 3].imshow(patch, cmap='gray')
+        axs [0, 3].set_title ('Selected Patch')
 
-    axs[1, 0].plot(signal)
-    axs[1, 0].set_title('Voxel')
-    axs[1, 1].plot(e)
-    axs [1, 1].set_title ('Fitted')
+        axs[1, 0].plot(signal)
+        axs[1, 0].set_title('Voxel')
+        axs[1, 1].plot(e)
+        axs [1, 1].set_title ('Fitted')
 
-    x = range(499)
-    axs[1, 2].plot(x,hist)
-    axs[1,2].ticklabel_format (axis='y', style='scientific', scilimits=(0, 0))
+        x = range(499)
+        axs[1, 2].plot(x,hist)
+        axs[1,2].ticklabel_format (axis='y', style='scientific', scilimits=(0, 0))
 
-    def fine2coarse(x):
-        return x // 10
-    def coarse2fine(x):
-        return x * 10
+        def fine2coarse(x):
+            return x // 10
+        def coarse2fine(x):
+            return x * 10
 
-    axs[1, 2].set_title ('pdff histogram')
-    secax = axs[1,2].secondary_xaxis ('top', functions=(fine2coarse, coarse2fine))
-    secax.set_xlabel ('hist [%]')
+        axs[1, 2].set_title ('pdff histogram')
+        secax = axs[1,2].secondary_xaxis ('top', functions=(fine2coarse, coarse2fine))
+        secax.set_xlabel ('hist [%]')
 
-    axs [1, 3].text (0.5, 0.75, output, verticalalignment='top', horizontalalignment='center',
-                     transform=axs [1, 3].transAxes,
-                     color='green', fontsize=15)
-    toggle_selector.ES = EllipseSelector (axs[0, 2], onselect, drawtype='line', lineprops=dict(color="red", linestyle="-", linewidth=2, alpha=0.5))
-    fig.canvas.mpl_connect ('key_press_event', toggle_selector)
+        axs [1, 3].text (0.5, 0.75, output, verticalalignment='top', horizontalalignment='center',
+                         transform=axs [1, 3].transAxes,
+                         color='green', fontsize=15)
+        toggle_selector.ES = EllipseSelector (axs[0, 2], onselect, drawtype='line', lineprops=dict(color="red", linestyle="-", linewidth=2, alpha=0.5))
+        fig.canvas.mpl_connect ('key_press_event', toggle_selector)
 
-    plt.autoscale
-    plt.show()
+        plt.autoscale
+        plt.show()
 
+    instant_res = run_location ([75, 100, 8, 8], results)
+    plot_instant_result(instant_res)
 
 
 if __name__ == '__main__':

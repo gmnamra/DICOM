@@ -414,7 +414,7 @@ def main_dicom(path):
         secax = axs[1,2].secondary_xaxis ('top', functions=(fine2coarse, coarse2fine))
         secax.set_xlabel ('hist [%]')
 
-        axs [1, 3].text (0.05, 0.85, output, verticalalignment='top', horizontalalignment='left',
+        axs [1, 3].text (0.025, 0.85, output, verticalalignment='top', horizontalalignment='left',
                          transform=axs [1, 3].transAxes,
                          color='green', fontsize=13)
         toggle_selector.ES = EllipseSelector (axs[0, 2], onselect, drawtype='line', lineprops=dict(color="red", linestyle="-", linewidth=2, alpha=0.5))

@@ -9,20 +9,11 @@ import argparse
 import glob
 from pathlib import Path
 import numpy as np
-import itertools
-import matplotlib.gridspec as gridspec
 import matplotlib.pyplot as plt
-from dicom_utils import getPixelDataFromDataset
+from dicom_utils import getPixelDataFromDataset, normalize_minmax_nan_image
 from operator import attrgetter
-from sklearn import preprocessing
 import math
-
-# %%
-def normalize_image (img, norm='l2'):
-    return preprocessing.normalize (img, norm)
-
-
-
+from matplotlib.ticker import AutoMinorLocator
 
 def read_dicom (path):
     """
@@ -163,16 +154,14 @@ def process_dicom_multi_echo (path, target_x_size=0, target_y_size=0, target_z_s
     result_dict ['flip_angle'] = dicom_lst[0] [0].FlipAngle
     result_dict ['TR'] = dicom_lst[0][0].RepetitionTime
 
-
-
     # reports back the first and last instance number of the image sequence
     result_dict ['first_instance_number'] = dicom_lst [0] [0].InstanceNumber
     result_dict ['last_instance_number'] = dicom_lst [-1] [-1].InstanceNumber
     Nimg = np.abs ((result_dict ['last_instance_number'] - result_dict ['first_instance_number']) + 1)
     # return image sizes to result dict
-    Nz = 6 #np.int (Nimg / num_echoes)
-    Ny = np.int (dicom_lst [0] [0].Rows)
-    Nx = np.int (dicom_lst [0] [0].Columns)
+    result_dict['depth'] = num_echos
+    result_dict['height'] = np.int (dicom_lst [0] [0].Rows)
+    result_dict['width'] = np.int (dicom_lst [0] [0].Columns)
     # the following data might not be available due to anonymization
     try:
         result_dict ['patientID'] = dicom_lst [0] [0].PatientID
@@ -180,20 +169,8 @@ def process_dicom_multi_echo (path, target_x_size=0, target_y_size=0, target_z_s
         result_dict ['ScanningSequence'] = dicom_lst [0][0].ScanningSequence
     except:
         pass
-    # make a list and cast as 3D matrix for each echo
-    # give the option that don't interpolate along the z-axis if 2-D processing
-    if target_z_size == 0:
-        target_z_size = Nz
-    # also give the option using original image matrix
-    if target_x_size == 0:
-        target_x_size = Nx
 
-    if target_y_size == 0:
-        target_y_size = Ny
-
-    scale_x = target_x_size / Nx
-    scale_y = target_y_size / Ny
-    scale_z = target_z_size / Nz
+    scale_x = scale_y = scale_z = 1.0
     result_dict ['image_scale'] = (scale_x, scale_y, scale_z)
     x_sampling = np.float (dicom_lst [0] [0].PixelSpacing [0])
     y_sampling = np.float (dicom_lst [0] [0].PixelSpacing [1])
@@ -201,68 +178,60 @@ def process_dicom_multi_echo (path, target_x_size=0, target_y_size=0, target_z_s
     result_dict ['image_resolution'] = (x_sampling * scale_x, y_sampling * scale_y, z_sampling * scale_z)
     result_dict['Phase'] = []
     result_dict['Magnitude'] = []
+    result_dict ['MedianPhase'] = []
+    result_dict ['MedianMagnitude'] = []
     result_dict ['PhaseVoxels'] = []
     result_dict ['MagnitudeVoxels'] = []
     ## We are sorted by echo number.
     ## There are S series each having mag and phase sub series.
     for ii in range (result_dict['num_echos']):
         #@todo use ['ImageType'][2] instead of hardwiring it.
-        dst = dicom_lst[ii]
-        for ds in dicom_lst[ii]:
-            print('%s,%d'%(ds.SeriesTime, ds.EchoNumbers))
-
+        mtypes = []
+        ptypes = []
+        for idx, ds in enumerate(dicom_lst[ii]):
+            itype = ds['ImageType'][2]
+            #print('%s,%d,%s'%(ds.SeriesTime, ds.EchoNumbers, itype))
+            if itype == 'M':mtypes.append(idx)
+            elif itype == 'P':ptypes.append(idx)
         pxl_lst = [getPixelDataFromDataset(ds) for ds in dicom_lst[ii]]
-        image_types = [ds['ImageType'][2] for ds in dicom_lst[ii]]
-        mtype = [tt == 'M' for tt in image_types]
-        ptypes = [tt == 'P' for tt in image_types]
-        even = range(0, len(dicom_lst[ii]), 2)
-        odd = range(1,len(dicom_lst[ii]), 2)
-        phases = np.array ([pxl_lst [e] for e in even])
-        mags = np.array ([pxl_lst [o] for o in odd])
+        phases = np.array ([pxl_lst [e] for e in ptypes])
+        mags = np.array ([pxl_lst [o] for o in mtypes])
         result_dict ['Phase'].append(phases)
         result_dict ['Magnitude'].append (mags)
-
-    result_dict ['water_by_series'] = []  # number of series of number of echos / 2 pairs
-    result_dict ['fat_by_series'] = []  # number of series of number of echos / 2 pairs
-    result_dict ['average_water_by_series'] = []  # number of series of pairs
-    result_dict ['average_fat_by_series'] = []  # number of series of pairs
-    result_dict ['opip_by_series'] = []  # number of series of pairs
-    result_dict ['pdff'] = []  # number of series of pairs
-    ## Number of OP, IP pairs
-    opip_pairs = num_echos // 2
+        medp = np.median(phases, axis=0)
+        medm = np.median(mags, axis=0)
+        result_dict ['MedianPhase'].append(medp)
+        result_dict ['MedianMagnitude'].append (medm)
 
     ## we will use average of 2 point dixons in a serie as seed values in per voxel pdff fitings
     ## For each Series create opip_pairs number of dixon2 water and fat images
     # note that we do not divide by 2. It will cancel out when we produce pdff
     #
-    for s in range (len(result_dict['Magnitude'])):
-        waters = []
-        fats = []
-        opips = []
-        # Collect inphase and out of phase
-        for e in range(opip_pairs):
-            oIndex = e * 2
-            iIndex = oIndex + 1
-            op = result_dict['Magnitude'][oIndex][s]
-            ip = result_dict['Magnitude'][iIndex][s]
-            water = np.add(ip,op)
-            fat = np.abs(np.subtract(ip.astype('int16'),op.astype('int16')))
-            waters.append(water)
-            fats.append(fat)
-            opips.append (op)
-            opips.append (ip)
-        result_dict ['water_by_series'].append (waters)
-        result_dict ['fat_by_series'].append (fats)
-        ## Produce average water and fet images
-        avg_water = np.mean(waters, axis=0)
-        avg_fat = np.mean(fats,axis=0)
-        result_dict ['average_water_by_series'].append (avg_water)
-        result_dict ['average_fat_by_series'].append (avg_fat)
-        result_dict['opip_by_series'].append(opips)
-        pdff = np.multiply(avg_fat, 100)
-        pdff = pdff / np.add(avg_fat, avg_water)
-        result_dict ['pdff'].append (pdff)
+    # Collect inphase and out of phase
+    ip1 = result_dict['MedianMagnitude'][0]
+    op = result_dict ['MedianMagnitude'] [1]
+    ip2 = result_dict ['MedianMagnitude'] [2]
+    water = np.add(ip1,op)
+    fat = np.subtract(ip1.astype('int16'),op.astype('int16'))
+    result_dict ['water'] = water
+    result_dict ['fat'] = fat
+    pdff = np.multiply(fat, 1000)
+    pdff = pdff / np.add(fat, water)
+    result_dict ['pdff'] = np.clip(pdff, 0.0, 1000)
+    result_dict ['OutOfPhaseMagnitude'] = op
+    result_dict ['InPhaseMagnitude'] = ip1
+    t2s = np.subtract (ip2.astype ('float'), ip1.astype ('float'))
+    s1os2 = np.divide (ip1.astype ('float'), ip2.astype ('float'))
+    s1os2 = np.log(s1os2)
+    tmp = t2s * s1os2
+    result_dict['T2*'] = tmp
+    correction = np.exp(np.divide(t2s,result_dict['T2*']))
+    ip1_corrected = np.multiply(ip1, correction)
+    result_dict['InPhaseMagnitudeCorrected'] = np.clip(ip1_corrected, 0, 255)
+    # pdff3 = np.subtract(ip1_corrected,op.astype('float')) / np.add(ip1_corrected,ip1_corrected)
+    # pdff3 = np.multiply(pdff3, 100.0)
 
+    # result_dict['pdff3'] = pdff3
     # Produce Coarse PDFFs using (IP - OP)/ (IP + IP)
     return result_dict
 
@@ -307,32 +276,9 @@ def get_roi_signal(images, roi): # roi is x, y, width, height
         area = images[idx][roi[1]:roi[1]+roi[3],roi[0]:roi[0]+roi[2]]
         signal.append(np.mean(area))
 
-    return signal
+    return np.array(signal)
 
 from fitlib import lsqcurvefit
-
-def main_dicom(path):
-
-    results = process_dicom_multi_echo(path)
-
-    show_images (results ['pdff'])
-    show_images (results ['opip_by_series'][0])
-
-   # show_images (results['average_water_by_series'])
-
-    loc = [67,128,1,1]
-    signal = get_roi_signal(results['opip_by_series'][0], loc)
-    print ('Water')
-    for ii in results['average_water_by_series']:
-        print(ii[loc[1],loc[0]])
-
-    print ('Fat')
-    for ii in results ['average_fat_by_series']:
-        print (ii [loc [1], loc [0]])
-
-    print(signal)
-    plt.plot(signal)
-    plt.show()
 
 def fat_peaks_integral (te_seconds):
     dfp = [39,-32,-125,-166,-217,-243]
@@ -344,7 +290,8 @@ def fat_peaks_integral (te_seconds):
         isum = isum + dd
     return isum
 
-def func(x,tmsec,y):
+
+def generate(x,tmsec):
     s1 = x[0]
     s2 = x[1]
     t2s = x[2]
@@ -353,11 +300,12 @@ def func(x,tmsec,y):
         t = tt / 1000
         fpi = fat_peaks_integral(t)
         st = s1 * s1 + s2 * s2 * fpi * fpi + 2 * s1 * s2 * fpi
-        st = math.sqrt(st) * math.exp(-t/t2s) * 100
+        st = math.sqrt(st) * math.exp(-t/t2s)
         out.append(st)
-    outa = np.array(out)
-    ya = np.array(y)
-    return outa - ya
+    return np.array(out)
+
+def func(x,tmsec,y):
+    return generate(x,tmsec) - y
 
 from scipy.optimize import least_squares
 from scipy.optimize import curve_fit
@@ -365,26 +313,16 @@ from scipy.optimize import curve_fit
 def func2(x,a, b, c):
     return a * np.exp(-b * x) + c
 
-def main_fit():
-    v20 = [15,18,13,17,10,14]
-    v10 = [18,20,14,16,11,13]
-    v1 = [17.0, 18.0, 16.0, 16.0, 14.0, 14.0]
-    pdff_1 = 5.0  # 45, 2.66
-    pdff_10 = 6.2  # 30, 2.3
-    pdff_20 = 12.5  # 30, 4.3
 
+def signal_fit(signal, water,fat, t2r):
     tes = [1.2,3.2,5.2,7.2,9.2,11.2]
     e = np.zeros((1,6), dtype=float)
-    vsys = 0.020
-    water = 0.31
-    fat = 0.0033
-    signal = v1
 
-    e = func([water,fat,vsys],tes,signal)
+    res_lsq = least_squares(func, [water, fat, t2r], method='lm', args = (tes, signal))
+    e = generate(res_lsq.x, tes)
+    return res_lsq, e
 
-    res_lsq = least_squares(func, [vsys, water, fat], args = (tes, signal))
-    print (res_lsq)
-
+def curve_fit_example():
     xdata = np.linspace(0,4,50)
     y = func2(xdata, 2.5, 1.3, 0.5)
     ydata = y + 0.2 * np.random.normal(size=len(xdata))
@@ -393,6 +331,81 @@ def main_fit():
     print(pcov)
 
 
+def main_dicom(path):
+
+    results = process_dicom_multi_echo(path)
+    id_str = Path(path).stem
+
+
+    loc = [75,100,8,8]
+    signal = get_roi_signal(results['MedianMagnitude'], loc)
+    print ('Water')
+    ii = results['water']
+    pwater = ii[loc[1],loc[0]]
+    ii = results ['fat']
+    pfat = ii [loc [1], loc [0]]
+    ii = results ['pdff']
+    pdff = ii [loc [1], loc [0]] / 10
+    ii = results ['T2*']
+    print('T2* %f'%(ii[loc[1], loc[0]]))
+
+    res_lsq, e = signal_fit(signal / 100, pwater / 100, pfat / 100, 0.023)
+    print(res_lsq)
+    print(e)
+    hist, edges = np.histogram(results['pdff'], bins=range(500))
+    fitted = res_lsq.x
+    fitted_water = math.fabs(fitted[0]) * 100
+    fitted_fat = math.fabs(fitted[1]) * 100
+    fitted_pdff = (fitted_fat) * 100 / (fitted_fat + fitted_water)
+
+    output = "{id} \n\n @ ({x},{y} path_size = {ps}]\n \n Signal Based: \n\n [{pw:2.2f},{pf:2.2f}] -> {pff:2.2f} \n \n Model Based \n\n[{epw:2.2f},{epf:2.2f}] -> {epff:2.2f} ".format \
+        (id=id_str, x=loc[0],y=loc[1], ps=loc[3], pw=pwater, pf=pfat,pff=pdff, epw= fitted_water, epf= fitted_fat, epff=fitted_pdff)
+    print (output)
+
+    class Formatter (object):
+        def __init__ (self, im):
+            self.im = im
+
+        def __call__ (self, x, y):
+            z = self.im.get_array () [int (y), int (x)]
+            return 'x={:.01f}, y={:.01f}, z={:.01f}'.format (x, y, z)
+
+
+    f, axs = plt.subplots(2, 4, figsize=(20, 10), frameon=False,
+                          subplot_kw={'xticks': [], 'yticks': []})
+    axs[0, 0].imshow(results ['MedianMagnitude'][0], cmap='gray')
+    axs[0, 0].set_title('Median IP')
+    axs [0, 1].imshow (results ['MedianMagnitude'] [1], cmap='gray')
+    axs[0, 1].set_title('Median OP')
+    im = axs[0, 2].imshow (results ['pdff'], interpolation='none', cmap='gray')
+    axs[0, 2].format_coord = Formatter (im)
+    axs[0, 2].set_title('PDFF')
+
+    axs[1, 0].plot(signal)
+    axs[1, 0].set_title('Voxel')
+    axs[1, 1].plot(e)
+    axs [1, 1].set_title ('Fitted')
+
+    x = range(499)
+    axs[1, 2].plot(x,hist)
+    axs[1,2].ticklabel_format (axis='y', style='scientific', scilimits=(0, 0))
+
+    def fine2coarse(x):
+        return x // 10
+    def coarse2fine(x):
+        return x * 10
+
+    axs[1, 2].set_title ('pdff histogram')
+    secax = axs[1,2].secondary_xaxis ('top', functions=(fine2coarse, coarse2fine))
+    secax.set_xlabel ('hist [%]')
+
+    axs [1, 3].text (0.5, 0.75, output, verticalalignment='top', horizontalalignment='center',
+                     transform=axs [1, 3].transAxes,
+                     color='green', fontsize=15)
+
+    plt.autoscale
+    plt.show()
+
 
 
 if __name__ == '__main__':
@@ -400,6 +413,5 @@ if __name__ == '__main__':
     path = sys.argv [1]
     if not os.path.isdir (path): sys.exit(1)
 
-    main_fit()
     main_dicom (path)
 

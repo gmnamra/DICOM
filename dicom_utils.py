@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
-
+from sklearn import preprocessing
 import numpy as np
-import pydicom
-import sys
+
+
+def normalize_image (img, norm='l2'):
+    return preprocessing.normalize (img, norm)
+
+def normalize_minmax_nan_image (img):
+    # """ Normalize image values to [0,1] """
+    min_, max_ = float (np.nanmin (img)), float (np.nanmax (img))
+    return (img - min_) / (max_ - min_)
 
 def getPixelDataFromDataset(ds):
     """  return the pixel data from the given dataset. If the data

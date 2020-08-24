@@ -278,8 +278,6 @@ def get_roi_signal(images, roi): # roi is x, y, width, height
 
     return np.array(signal)
 
-from fitlib import lsqcurvefit
-
 def fat_peaks_integral (te_seconds):
     dfp = [39,-32,-125,-166,-217,-243]
     drp = [0.047,0.039,0.006,0.120,0.700,0.088]
@@ -291,16 +289,19 @@ def fat_peaks_integral (te_seconds):
     return isum
 
 
+
 def generate(x,tmsec):
     s1 = x[0]
     s2 = x[1]
-    t2s = x[2]
+    vsys = x[2]
+    v1 = vsys
+    v2 = vsys + 1/0.012
     out = []
+    w = 2* math.pi / 0.0036
     for tt in tmsec:
         t = tt / 1000
-        fpi = fat_peaks_integral(t)
-        st = s1 * s1 + s2 * s2 * fpi * fpi + 2 * s1 * s2 * fpi
-        st = math.sqrt(st) * math.exp(-t/t2s)
+        st = s1 * s1 * math.exp(-2 * v1 * t) + s2 * s2 * math.exp(-2 * v2 * t) + 2 * s1 * s2 * math.exp(- v1 * t - v2 * t)*math.cos(w * t)
+        st = math.sqrt(st)
         out.append(st)
     return np.array(out)
 
@@ -349,7 +350,7 @@ def main_dicom(path):
     ii = results ['T2*']
     print('T2* %f'%(ii[loc[1], loc[0]]))
 
-    res_lsq, e = signal_fit(signal / 100, pwater / 100, pfat / 100, 0.023)
+    res_lsq, e = signal_fit(signal / 100, pwater / 100, pfat / 100, 0.0)
     print(res_lsq)
     print(e)
     hist, edges = np.histogram(results['pdff'], bins=range(500))

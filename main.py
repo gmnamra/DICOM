@@ -13,7 +13,8 @@ import matplotlib.pyplot as plt
 from dicom_utils import getPixelDataFromDataset, normalize_minmax_nan_image
 from operator import attrgetter
 import math
-from matplotlib.ticker import AutoMinorLocator
+from matplotlib.widgets import EllipseSelector
+
 
 def read_dicom (path):
     """
@@ -332,36 +333,58 @@ def curve_fit_example():
     print(pcov)
 
 
+
 def main_dicom(path):
+
+    def onselect (eclick, erelease):
+        "eclick and erelease are matplotlib events at press and release."
+        print ('startposition: (%f, %f)' % (eclick.xdata, eclick.ydata))
+        print ('endposition  : (%f, %f)' % (erelease.xdata, erelease.ydata))
+        print ('used button  : ', eclick.button)
+        ctr = [int((eclick.xdata + erelease.xdata) / 2.0), int((eclick.ydata + erelease.ydata) / 2.0)]
+        patch = [int(math.fabs(eclick.xdata - erelease.xdata) / 2.0) , int(math.fabs(eclick.ydata - erelease.ydata) / 2.0)]
+        loc = [ctr[0],ctr[1],patch[0],patch[1]]
+        run_location(loc)
+
+    def toggle_selector (event):
+        print (' Key pressed.')
+        if event.key in ['Q', 'q'] and toggle_selector.ES.active:
+            print ('EllipseSelector deactivated.')
+            toggle_selector.RS.set_active (False)
+        if event.key in ['A', 'a'] and not toggle_selector.ES.active:
+            print ('EllipseSelector activated.')
+            toggle_selector.ES.set_active (True)
 
     results = process_dicom_multi_echo(path)
     id_str = Path(path).stem
 
+    def run_location(loc):
+        signal = get_roi_signal(results['MedianMagnitude'], loc)
+        print ('Water')
+        ii = results['water']
+        pwater = ii[loc[1],loc[0]]
+        ii = results ['fat']
+        pfat = ii [loc [1], loc [0]]
+        ii = results ['pdff']
+        pdff = ii [loc [1], loc [0]] / 10
+        ii = results ['T2*']
+        print('T2* %f'%(ii[loc[1], loc[0]]))
 
-    loc = [75,100,8,8]
-    signal = get_roi_signal(results['MedianMagnitude'], loc)
-    print ('Water')
-    ii = results['water']
-    pwater = ii[loc[1],loc[0]]
-    ii = results ['fat']
-    pfat = ii [loc [1], loc [0]]
-    ii = results ['pdff']
-    pdff = ii [loc [1], loc [0]] / 10
-    ii = results ['T2*']
-    print('T2* %f'%(ii[loc[1], loc[0]]))
+        res_lsq, e = signal_fit(signal / 100, pwater / 100, pfat / 100, 0.0)
+        print(res_lsq)
+        print(e)
+        hist, edges = np.histogram(results['pdff'], bins=range(500))
+        fitted = res_lsq.x
+        fitted_water = math.fabs(fitted[0]) * 100
+        fitted_fat = math.fabs(fitted[1]) * 100
+        fitted_pdff = (fitted_fat) * 100 / (fitted_fat + fitted_water)
 
-    res_lsq, e = signal_fit(signal / 100, pwater / 100, pfat / 100, 0.0)
-    print(res_lsq)
-    print(e)
-    hist, edges = np.histogram(results['pdff'], bins=range(500))
-    fitted = res_lsq.x
-    fitted_water = math.fabs(fitted[0]) * 100
-    fitted_fat = math.fabs(fitted[1]) * 100
-    fitted_pdff = (fitted_fat) * 100 / (fitted_fat + fitted_water)
+        output = "{id} \n\n @ ({x},{y} path_size = {ps}]\n \n Signal Based: \n\n [{pw:2.2f},{pf:2.2f}] -> {pff:2.2f} \n \n Model Based \n\n[{epw:2.2f},{epf:2.2f}] -> {epff:2.2f} ".format \
+            (id=id_str, x=loc[0],y=loc[1], ps=loc[3], pw=pwater, pf=pfat,pff=pdff, epw= fitted_water, epf= fitted_fat, epff=fitted_pdff)
+        print (output)
+        return signal, e, output, hist
 
-    output = "{id} \n\n @ ({x},{y} path_size = {ps}]\n \n Signal Based: \n\n [{pw:2.2f},{pf:2.2f}] -> {pff:2.2f} \n \n Model Based \n\n[{epw:2.2f},{epf:2.2f}] -> {epff:2.2f} ".format \
-        (id=id_str, x=loc[0],y=loc[1], ps=loc[3], pw=pwater, pf=pfat,pff=pdff, epw= fitted_water, epf= fitted_fat, epff=fitted_pdff)
-    print (output)
+    signal, e, output, hist = run_location([75,100, 8, 8])
 
     class Formatter (object):
         def __init__ (self, im):
@@ -372,7 +395,7 @@ def main_dicom(path):
             return 'x={:.01f}, y={:.01f}, z={:.01f}'.format (x, y, z)
 
 
-    f, axs = plt.subplots(2, 4, figsize=(20, 10), frameon=False,
+    fig, axs = plt.subplots(2, 4, figsize=(20, 10), frameon=False,
                           subplot_kw={'xticks': [], 'yticks': []})
     axs[0, 0].imshow(results ['MedianMagnitude'][0], cmap='gray')
     axs[0, 0].set_title('Median IP')
@@ -403,6 +426,8 @@ def main_dicom(path):
     axs [1, 3].text (0.5, 0.75, output, verticalalignment='top', horizontalalignment='center',
                      transform=axs [1, 3].transAxes,
                      color='green', fontsize=15)
+    toggle_selector.ES = EllipseSelector (axs[0, 2], onselect, drawtype='line', lineprops=dict(color="red", linestyle="-", linewidth=2, alpha=0.5))
+    fig.canvas.mpl_connect ('key_press_event', toggle_selector)
 
     plt.autoscale
     plt.show()

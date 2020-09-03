@@ -352,7 +352,7 @@ def main_dicom(path):
         pdff = ii [loc [1], loc [0]] / 10
         ii = results ['T2*']
 
-        res_lsq, e = signal_fit(signal / 100, pwater / 100, pfat / 100, 0.0)
+        res_lsq, e = signal_fit(signal , pwater / 100, pfat / 100, 0.0)
         ncv = np.corrcoef (signal, e)
         fit_quality = ncv [0] [1]
         hist, edges = np.histogram(results['pdff'], bins=range(500))
